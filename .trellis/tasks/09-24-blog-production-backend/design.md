@@ -159,7 +159,15 @@ Postgres
 
 ## 3. 前端设计（`apps/web`）
 
-### 3.1 门户外壳与模块注册表（R13 的落地形态）
+### 3.1 首页定位：门户 hub
+
+**首页是门户，不是文章列表。** 上半部是模块卡片（agent、游戏、GitHub 项目、个人信息），下半部是最新文章摘要。文章列表移到 `/blog`。
+
+理由：项目已明确"不止展示文章，而是若干模块的聚合"。若首页仍是文章流，模块就只是导航栏里几个链接，"门户"这一层就名不副实，S5 的网关工作也失去展示面。
+
+**代价**：博客的"阅读感"被削弱，首屏不再直接是文章。缓解：首页下半部保留最新文章摘要与直达链接，阅读路径依然短。
+
+### 3.2 门户外壳与模块注册表（R13 的落地形态）
 
 门户首页不硬编码链接，而是渲染一份**模块注册表**：
 
@@ -171,6 +179,7 @@ type PortalModule = {
   icon: string
   path: string                                   // 门户内的挂载路径
   integration: 'reverse-proxy' | 'subdomain'     // 由模块自己声明支持哪种
+  embed: 'link' | 'iframe' | 'inline'            // 在门户页面里如何出现，见 §4.2
   health?: string                                // 健康检查地址
   auth: 'public' | 'shared-sso'
   enabled: boolean
@@ -179,21 +188,59 @@ type PortalModule = {
 
 **关键设计**：新增一个模块 = 注册表加一条记录。这让 R13 的"契约"变成可执行的东西，而不是文档里的约定；也是 S9 接入未来两个小站时的唯一接口。
 
-### 3.2 渲染策略
+**`embed` 必须由模块声明，不能由门户统一规定**——游戏塞进 iframe 是灾难（键盘焦点捕获、全屏 API 不可用、渲染性能受损），而 agent 这类面板型模块用 iframe 恰好合适。
+
+### 3.3 渲染策略
 
 | 页面 | 策略 | 理由 |
 |---|---|---|
-| 首页 / 门户 | SSR | 模块健康状态实时，不能静态缓存 |
-| 文章列表 / 详情 | **SSG + ISR** | SEO 主战场；文章发布后按需 revalidate，兼顾收录与新鲜度 |
+| 首页 / 门户 hub | SSR | 模块健康状态实时，不能静态缓存 |
+| 模块页面（`/agent` 等） | 按 `embed` 决定 | `link` 型直接整页跳转；`iframe` 型嵌在门户外壳内 |
+| 文章列表 / 详情（`/blog/*`） | **SSG + ISR** | SEO 主战场；文章发布后按需 revalidate，兼顾收录与新鲜度 |
 | 管理后台 | CSR | 无 SEO 需求，且需登录态 |
 
 **这解决 D7**：文章页产出真实 HTML，社交平台能抓到 OG，爬虫能索引正文。
 
-### 3.3 数据获取
+> 注意：iframe 内的模块内容**对搜索引擎不可见**。因此模块自身仍需可独立直访（反代路径已提供），其 SEO 由模块自己负责，门户不代偿。
+
+### 3.4 数据获取
 
 - 服务端组件直接 `fetch` 门户 API（`/api/v1/*`），携带 `next: { revalidate }` 或 `cache: 'no-store'`
 - 浏览器侧需要登录的调用走 `/api/v1/auth/*`
 - **类型全部来自 `packages/shared`**——契约漂移在 `tsc` 阶段就被拦住
+
+### 3.5 设计令牌层（统一视觉，不统一组件库）
+
+**结论：统一设计令牌，不统一组件库。**
+
+实测两个已有模块的技术栈：
+
+| | 门户（MyBlog） | agent（my-agent） |
+|---|---|---|
+| 构建 | Vite 4 | Vite 5 |
+| UI 组件 | Tailwind 3 + 自建组件 | **antd 6.6.4 + @ant-design/x** |
+| 设计令牌 | CSS 变量（HSL） | **CSS 变量（hex）——已存在** |
+| 状态 | zustand 5 | zustand 5 |
+| 测试 | 无 | vitest + Testing Library |
+
+**为什么不该统一组件库**：三种模块是三种不同的 UI 问题——博客是内容阅读（排版、代码高亮），agent 是 AI 对话工作台（表格、树、表单、对话气泡），游戏是 canvas。用 Tailwind 手搓 antd 的表格/树要数天；用 antd 做博客排版又重又难看。
+
+**为什么统一令牌却可行且便宜**：两边**都已经有 CSS 变量令牌层**——`apps/web/src/index.css` 用 HSL 变量，agent `src/styles.css` 用 hex 变量，且浅色底都是暖白系（`#F6EFE9` vs `#fafaf9`），方向本来就一致。统一只需定一份规范值，两边各自映射，谁都不用换组件库。
+
+**形式必须是技术栈无关的**：
+
+- 令牌以 **CSS 变量 + tokens JSON** 发布
+- **不能是 React 组件包**——游戏是 canvas，Python 服务端渲染的模块也不消费 React 包，但都读得懂 CSS 变量与 JSON
+
+这与 §4.1「接入契约不约束模块用什么语言」是同一条原则：**共享的东西必须与技术栈无关**。
+
+**分层职责**：
+
+| 层 | 是否统一 | 形式 |
+|---|---|---|
+| 设计令牌 | ✅ 统一 | CSS 变量 + tokens JSON |
+| 组件库 | ❌ 各自选择 | — |
+| 导航外壳 | ⚠️ 各模块自实现，视觉对齐令牌 | 不共享组件，只共享变量 |
 
 ---
 
@@ -207,8 +254,9 @@ type PortalModule = {
 |---|---|---|
 | 元数据 | 注册表条目 | 标题、图标、路径、描述 |
 | 接入模式 | `reverse-proxy` 或 `subdomain` | 模块自声明；反代需支持子路径部署 |
+| 嵌入模式 | `link` / `iframe` / `inline` | 模块自声明，见 §4.2 |
 | 健康检查 | `GET <path>/health` | 200 = 健康 |
-| 鉴权约定 | `shared-sso` 或 `public` | 见 4.3 |
+| 鉴权约定 | `shared-sso` 或 `public` | 见 §4.4 |
 
 门户必须提供：
 
@@ -216,7 +264,27 @@ type PortalModule = {
 - 模块不可用时的降级 UI（而非整页报错）
 - 登录态向模块传递的机制
 
-### 4.2 子路径部署的改造清单（每个模块的主要工作量）
+### 4.2 三种嵌入模式（双入口的核心）
+
+**前提**：反代路径天然满足"模块不只能从门户进入"——`/agent/` 既是门户页面里的嵌入地址，也是可以直接贴给别人的独立地址。**同一个 URL 服务两种入口，不需要做两套集成。**
+
+| 模式 | 行为 | 适用 | 本项目例子 |
+|---|---|---|---|
+| `link` | 门户首页显示卡片，点击整页跳转到模块路径 | 全屏型、沉浸型 | 游戏（iframe 会毁掉键盘焦点、全屏 API 与渲染性能） |
+| `iframe` | 门户页面内嵌一个指向同源模块路径的 iframe | 面板型，能与文章等其他内容并存 | agent（文章旁开对话面板） |
+| `inline` | 直接以组件形式渲染 | 同构模块（同为 React 且愿意共享运行时） | 未来用 React 写的小站 |
+
+**为什么 `inline` 在本项目基本不会被用到**：它要求两个应用共享同一次 React 运行时，而这会撞上 §8 记录的 antd CSS-in-JS 与 Tailwind preflight 互相污染的问题。保留这个枚举值是为了契约完整性（未来若写一个纯 Tailwind 的小站，可以走这条）。
+
+**同源 iframe 的一个被低估的好处**：**cookie 天然共享**。门户与模块同域，`HttpOnly` cookie 直接可用，SSO 不需要 `Domain=.example.com`，也不需要 CORS 白名单。子域"逃生舱"模式反而要把这套全做一遍——这正是它的代价所在。
+
+**iframe 必须注意的三件事**：
+
+1. 模块响应需允许被嵌入：不设 `X-Frame-Options: DENY`，或在 CSP 中显式声明 `frame-ancestors` 为门户源
+2. 高度自适应需要 `postMessage` 通信（iframe 无法被子文档撑高）
+3. iframe 内的内容对搜索引擎不可见——模块的 SEO 由其独立地址自行负责，门户不代偿
+
+### 4.3 子路径部署的改造清单（每个模块的主要工作量）
 
 这是接入时最容易踩、也最值得记录的部分——**配错的后果是白屏或资源 404，不是配置报错**：
 
@@ -227,13 +295,14 @@ type PortalModule = {
 | agent-backend（FastAPI） | `root_path='/agent/api'`；uvicorn 加 `--proxy-headers`；否则重定向与 OpenAPI 文档里的 URL 全错 |
 | 所有模块 | 前端发请求的 base URL 需可配置，不能硬编码 `/api` |
 
-### 4.3 统一鉴权（R15）
+### 4.4 统一鉴权（R15）
 
 - **推荐：cookie 域下共享**。门户与模块在同一域名（反代模式）下，refresh token 放 `HttpOnly` + `SameSite=Lax` cookie，`path=/`。模块校验同一份 JWT。
-- **子域模式**：cookie 需 `Domain=.example.com`（跨子域共享）；跨域 fetch 需 `credentials: 'include'` + CORS 白名单。这一套比反代模式复杂，**正是"逃生舱"的代价**。
+- **同源 iframe 直接受益**：SameSite=Lax 允许同站 iframe 携带 cookie，因此 `embed: 'iframe'` 的模块在门户页面内**自动处于已登录态**，无需任何额外机制。这是选择同源反代而非子域的一个实质收益。
+- **子域模式**：cookie 需 `Domain=.example.com`（跨子域共享）；跨域 fetch 需 `credentials: 'include'` + CORS 白名单；iframe 还需处理跨站 cookie（SameSite=None + Secure，且浏览器可能拦截第三方 cookie）。这一套比反代模式复杂得多，**正是"逃生舱"的代价**。
 - 各模块授权边界独立：门户只负责"你是谁"，"你能做什么"由各模块自己判。
 
-### 4.4 容错（R14）
+### 4.5 容错（R14）
 
 - 门户定时（或按需）探活各模块 `health`，结果缓存进 Redis（短 TTL）
 - 模块 down → 门户卡片显示"维护中"，入口置灰，**不阻塞其他模块**
@@ -290,6 +359,9 @@ create index on comments (article_id, created_at);
 | access JWT 无状态 | 是 | 无法主动失效，需 denylist 补 | 若安全要求提高 → 改短 TTL + 强制 denylist 校验 |
 | 游标分页 vs offset | 游标 | 无法跳页 | 若后台需要"跳到第 N 页" → 后台单独用 offset |
 | 显式 api-1/api-2 vs `--scale` | 显式 | 扩容不灵活 | 若实例数常变 → 改 Docker DNS + resolver 方案 |
+| 统一令牌 vs 统一组件库 | 只统一令牌 | 各模块 UI 观感靠自觉对齐，无强制 | 若某模块明显跑偏 → 把令牌做成 lint 规则或构建期校验 |
+| 路径反代 + 同源 iframe vs 子域 | 反代 + 同源 | iframe 无法共享 DOM/状态，高度需 `postMessage` | 若某模块强烈需要与门户共享状态 → 评估 `inline` 或子域 |
+| 首页做门户 hub vs 保持文章流 | 门户 hub | 首屏不再是文章，博客"阅读感"被削弱 | 若发现访客绝大多数只看文章 → 把博客提回首页主位 |
 
 ---
 
@@ -311,6 +383,11 @@ create index on comments (article_id, created_at);
 ## 8. 本设计刻意不做的事
 
 - **不引入 K8s**：本地 Compose 已足够覆盖负载均衡、健康检查、服务发现的学习目标；K8s 的复杂度会淹没重点
-- **不上微前端**（Module Federation）：iframe 与反代已覆盖需求，微前端的收益在"多团队独立发布"，本项目无此问题
-- **不用 ORM**：见 2.2
+- **不上微前端**（Module Federation）。技术上并非不可能——门户与 agent 同为 React 18 + Vite + zustand。但有三个具体理由否掉它：
+  1. **全局样式会互相污染**。agent 用 antd 6（CSS-in-JS），门户用 Tailwind 3（工具类 CSS + preflight）。塞进同一个 document 后，antd 的 `body`/`*` 重置会污染门户，门户的 preflight 会破坏 antd 组件。这是具体冲突，不是风格偏好。
+  2. **异构模块根本无法参与**。游戏是 canvas、agent 后端是 Python，未来的小站技术栈未知。为三分之一的模块引入一套要求同构的架构，收益覆盖不了成本。
+  3. **它会耦合各模块的发布周期**——而契约式集成存在的意义恰恰是解耦这一层。
+  
+  微前端的真正收益在"多团队独立发布"，本项目是单人开发，无此问题。
+- **不用 ORM**：见 §2.2
 - **不引入消息队列中间件**（Kafka/RabbitMQ）：后台任务先用 Redis 承载（BullMQ），最后一个阶段再评估是否值得换

@@ -15,8 +15,8 @@
 | S1 | 数据迁移 + 文章读 API | SQL 迁移、分层、DTO 校验、统一错误、游标分页 | 1–2 周 |
 | S2 | 鉴权 | OAuth 授权码流、JWT、refresh 轮换与复用检测、越权测试 | 1–2 周 |
 | S3 | 写路径 + 文件 | 事务、对象存储、presigned URL、图片变体 | 1 周 |
-| S4 | 前端迁移 + 门户骨架 | Next.js App Router、SSG/ISR、模块注册表、SEO | 2 周 |
-| S5 | 网关 + 模块接入 | nginx 反代、子路径部署、健康检查、容错、SSO | 1–2 周 |
+| S4 | 前端迁移 + 门户 hub | Next.js App Router、SSG/ISR、模块注册表、设计令牌层、SEO | 2 周 |
+| S5 | 网关 + 模块接入 + 令牌统一 | nginx 反代、子路径部署、iframe 嵌入、健康检查、容错、SSO | 1–2 周 |
 | S6 | 性能与可观测 | 缓存与失效、击穿防护、限流、ETag、索引、指标、压测 | 1–2 周 |
 | S7 | 负载均衡与并发 | upstream 分流、无状态验证、连接池约束、压测对比 | 1 周 |
 | S8 | 交付与运维 | 多阶段镜像、CI/CD、环境隔离、灰度回滚、runbook | 1–2 周 |
@@ -126,12 +126,14 @@ curl -s localhost:3001/api/v1/articles/<id>/comments   # 嵌套结构正确
 
 ---
 
-## S4 · 前端迁移 + 门户骨架
+## S4 · 前端迁移 + 门户 hub
 
-**产出**：门户上线；文章模块走 Next.js；SEO 生效；D7 修复。
+**产出**：门户 hub 上线；文章模块走 Next.js；SEO 生效；D7 修复；设计令牌层抽出来。
 
 - [ ] `apps/web` 迁到 Next.js App Router
-- [ ] 模块注册表（`design.md` §3.1 的类型）+ 门户首页渲染注册表
+- [ ] **首页改造成门户 hub**：上半部模块卡片、下半部最新文章摘要；文章列表移到 `/blog`（Q10）
+- [ ] 模块注册表（`design.md` §3.2 的类型，含 `embed` 字段）+ 首页渲染注册表
+- [ ] **抽出设计令牌层**（`design.md` §3.5）：把现有 `index.css` 的 HSL 变量整理为规范令牌，同时产出 tokens JSON。这是 R17 的落地物，S5 交给 agent 消费
 - [ ] 文章列表 / 详情用 **SSG + ISR**，按需 revalidate
 - [ ] SEO：`generateMetadata` 输出 title/description/OG；`sitemap.xml`；`robots.txt`；RSS
 - [ ] 修复 D7（`<title>My Trae Project</title>` 与零 meta）；修复 D3（`Projects.tsx` 死代码与不存在的 `skin` 色板）
@@ -144,7 +146,9 @@ curl -s localhost:3001/api/v1/articles/<id>/comments   # 嵌套结构正确
 
 ```bash
 npm run build && npm start
-curl -s localhost:3000/blog/<slug> | grep -o '<meta property="og:title"[^>]*>'   # OG 存在
+curl -s localhost:3000/ | grep -c '模块'                    # 首页是 hub 而非文章列表
+curl -s localhost:3000/blog | head                          # 文章列表已移到这里
+curl -s localhost:3000/blog/<slug> | grep -o '<meta property="og:title"[^>]*>'
 curl -s localhost:3000/sitemap.xml | head
 # 查看页面源码确认正文 HTML 存在（非空 div）
 ```
@@ -153,17 +157,21 @@ curl -s localhost:3000/sitemap.xml | head
 
 ---
 
-## S5 · 网关 + 模块接入
+## S5 · 网关 + 模块接入 + 令牌统一
 
-**产出**：`/` 门户、`/blog`、`/agent` 都通；agent 挂掉门户不崩。
+**产出**：`/` 门户 hub、`/blog`、`/agent` 都通；agent 以 iframe 嵌入门户页面且已登录；agent 挂掉门户不崩；两边视觉一致。
 
 - [ ] nginx 网关加入 Compose，`gateway/nginx.conf` 做路径路由
-- [ ] agent 模块接入改造（`design.md` §4.2）：Vite `base`、router basename、FastAPI `root_path` + `--proxy-headers`
+- [ ] agent 模块接入改造（`design.md` §4.3）：Vite `base: '/agent/'`、router basename、FastAPI `root_path` + `--proxy-headers`
+- [ ] **iframe 嵌入**（`design.md` §4.2）：门户页面内嵌 `/agent/`，用 `postMessage` 解决高度自适应
+- [ ] **确认 agent 响应允许被嵌入**：不设 `X-Frame-Options: DENY`，或在 CSP 中声明 `frame-ancestors`
+- [ ] **给 agent 套上门户的设计令牌**（R17）：把 S4 产出的令牌映射进 agent 的 `styles.css` 变量与 antd `XProvider theme`，浅深色都要对
+- [ ] 游戏模块走 `link` 模式（整页跳转，不嵌 iframe）—— 即便游戏站尚未建，先把注册表条目与降级 UI 做好
 - [ ] 跨仓库编排：agent 镜像如何被门户 Compose 引用（构建后按 tag，或外部 build context）
 - [ ] 健康检查聚合：门户探活各模块并缓存进 Redis
 - [ ] 容错 UI：模块不可用显示"维护中"，不阻塞其他模块
 - [ ] nginx `proxy_next_upstream` 与超时配置
-- [ ] 统一鉴权（R15）：cookie 域共享方案
+- [ ] 统一鉴权（R15）：cookie 域共享方案；**验证同源 iframe 内自动已登录**
 - [ ] **契约文档成文**：模块需要提供什么、门户保证什么
 
 **验证**：
@@ -171,9 +179,11 @@ curl -s localhost:3000/sitemap.xml | head
 ```bash
 curl -s localhost/agent/ | head          # agent 前端资源路径正确（非 404）
 curl -s localhost/agent/api/docs         # FastAPI OpenAPI 里 URL 带正确前缀
+curl -sI localhost/agent/ | grep -i x-frame-options   # 不应为 DENY
 docker compose stop agent-api
 curl -s localhost/ | grep -c '维护中'     # 门户降级而非报错
 docker compose start agent-api
+# 浏览器里确认：iframe 内 agent 显示已登录；切换深浅色两边同步
 ```
 
 **风险/回滚**：子路径配置易白屏（**症状是资源 404 或空白页，不是配置报错**）。每个模块接入独立提交、独立验证。回滚点：单个模块回退不影响门户。
