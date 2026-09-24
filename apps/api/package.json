@@ -1,0 +1,14 @@
+{
+  "name": "api",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "check": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  }
+}
