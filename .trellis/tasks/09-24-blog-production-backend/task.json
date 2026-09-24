@@ -1,0 +1,28 @@
+{
+  "id": "blog-production-backend",
+  "name": "blog-production-backend",
+  "title": "个人博客生产化：自建后端学习项目",
+  "description": "把当前 Vite SPA + Supabase BaaS 博客，改造成自建 Node/Fastify 分层的生产级应用，兼作前后端生产技能学习项目。覆盖鉴权与安全、API 与数据库、性能与可观测、交付与运维、高并发与负载均衡五个学习方向。父任务持有需求全集、S0-S7 阶段地图与跨阶段验收标准。",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "gsr",
+  "assignee": "gsr",
+  "createdAt": "2026-09-24",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "09-24-blog-portal-s0-foundation"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

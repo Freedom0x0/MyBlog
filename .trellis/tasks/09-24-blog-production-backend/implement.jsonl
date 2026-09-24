@@ -1,0 +1,3 @@
+{"file": ".trae/documents/technical_architecture.md", "reason": "改造基线与缺陷证据：D1-D11 全部带 file:line 锚点，实现时据此定位待改位置"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "分层与跨层数据流：本任务核心是 routes/service/repository 分层与前后端契约，需遵循此指南的边界检查项"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "避免重复实现：改任何常量或新增工具函数前先搜索，减少新旧两套数据访问并存期的重复代码"}

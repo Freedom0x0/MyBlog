@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "仓库重构前的强制搜索纪律：Pre-Modification Rule 要求改任何值前先全局搜索。本次要搬动 package.json 脚本、tsconfig 路径、.env.example 变量，漏改一处就断链"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "本阶段要确立 routes/service/repository 的分层边界与 app.ts/server.ts 分离约定，需遵循该指南的边界检查清单"}
+{"file": ".trae/documents/technical_architecture.md", "reason": "现状基线：含当前目录结构、技术栈清单与既有缺陷清单，搬迁时据此确认没有遗漏需要一并带走的文件"}
