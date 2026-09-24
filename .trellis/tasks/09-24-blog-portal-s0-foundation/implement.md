@@ -172,7 +172,47 @@ docker compose -f infra/docker-compose.yml start postgres
 
 ---
 
+## 完成状态（2026-09-24）
+
+A–F 全部完成并通过验证：
+
+| 验证 | 结果 |
+|---|---|
+| `pnpm -r lint` | ✅ |
+| `pnpm -r check` | ✅ |
+| `pnpm -r --if-present test` | ✅ 16 passed / 3 files |
+| `pnpm --filter api build` | ✅ 产物不含测试文件 |
+| `pnpm --filter web build` | ✅ 3943 modules |
+| `node dist/server.js`（无配置） | ✅ 退出 1，列出全部缺失变量 |
+| Compose 两服务 healthy | ✅ PostgreSQL 17.11 / Redis PONG |
+| 停 Postgres → `/ready` 503 而 `/health` 200 | ✅ 实测 |
+| Redis 不可达 → 进程照常启动、`/ready` 503（0.34s） | ✅ 实测 |
+| 外部 `x-request-id` 贯穿日志与响应体 | ✅ 实测 |
+
+## 独立复核发现并已修复的问题
+
+复核代理（`trellis-check`）报告了 5 项，其中 3 项确认为真缺陷，均已修复并补测试：
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | 🔴 5xx 会转发 `error.code`，泄露 Postgres SQLSTATE（`23505`）与 Fastify 内部码（`FST_ERR_*`） | 引入 `ApiError`；5xx 一律 `INTERNAL_ERROR`，4xx 走状态码映射表；补 3 个测试（其中一个专门抛带 `.code` 的错误） |
+| 2 | 🔴 Redis 连不上会阻止启动，并以 `AVV_ERR_PLUGIN_EXEC_TIMEOUT` 未捕获拒绝收场；与 pg 的惰性连接不对称 | 首连不 await；`disableOfflineQueue` + 有界 `connectTimeout`；`main()` 加 `.catch()` |
+| 3 | 🟠 `CORS_ORIGIN` 已声明但无任何消费方 | 移除（等 S1 装 CORS 插件时一并加回） |
+| 4 | 🟠 空的 `gateway/` 目录克隆后不存在 | 删除；改在 S5 创建 |
+| 5 | 🟡 `authStore` 自造的 `User` 接口缺 `app_metadata` | **未修，交接给 S2**（见下） |
+
+## 交接给后续阶段的事项
+
+| 事项 | 归属 | 说明 |
+|---|---|---|
+| `authStore` 的 `User` 接口与 SDK 的 `User` 重复，且缺 `app_metadata` | **S2** | `app_metadata` 正是 D1 修复要用的字段。S2 重做管理员判定时应直接改用 `@supabase/supabase-js` 的 `User` 类型，否则会在安全相关路径上重新引入刚被清掉的 `as any` 模式 |
+| `packages/shared` 的构建策略未定 | **S1** | 目前只被 api 导入**类型**，编译时擦除，`rootDir` 无冲突。一旦导出运行时值需在「shared 产出 dist」与「TS project references」间选一条 |
+| `server.ts` 的 SIGTERM 优雅关闭无法在 Windows 验证 | **S8** | Windows 无 POSIX 信号，`taskkill` 只能强杀。只能在 Linux 容器里验 |
+| Redis 重连日志无节制 | **S6** | 每次重试记一条 error，长时间故障会刷屏。属可观测性问题 |
+| 跨平台换行符策略（`.gitattributes` 加 `* text=auto eol=lf`） | 未分配 | 当前不影响；会重写全仓库换行符，应作为独立改动并由用户决定 |
+
 ## 完成后需要用户确认的事
 
-- [ ] **是否将 Docker 目录加入系统 PATH**（`design.md` §6 方案 1）。这是修改用户环境的操作，需明确授权
+- [ ] **是否将 Docker 目录加入系统 PATH**：`C:\Users\15532\AppData\Local\Programs\DockerDesktop\resources\bin`。这是修改用户环境的操作，需明确授权
+- [ ] 跨平台换行符策略是否要统一处理
 - [ ] S1 是否立即开始（建 S1 子任务）

@@ -25,7 +25,8 @@ MyBlog/
 ├── infra/
 │   ├── docker-compose.yml
 │   └── .env.example
-├── gateway/                   S5 才用，S0 仅占位
+├── gateway/                   ← S5 创建（不在此处预建空目录：git 不跟踪空目录，
+│                                 克隆后并不存在，留一个空壳只是假象）
 └── .github/workflows/ci.yml
 ```
 
