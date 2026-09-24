@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 
 interface User {
@@ -8,15 +9,18 @@ interface User {
     full_name?: string;
     avatar_url?: string;
     user_name?: string;
+    // GitHub also exposes the login under this key; it is declared here rather
+    // than cast at each use site.
+    preferred_username?: string;
   };
 }
 
 interface AuthState {
   user: User | null;
-  session: any | null;
+  session: Session | null;
   isAdmin: boolean;
   loading: boolean;
-  setUser: (user: User | null, session?: any | null) => void;
+  setUser: (user: User | null, session?: Session | null) => void;
   signOut: () => Promise<void>;
 }
 
@@ -24,7 +28,7 @@ const ADMIN_GITHUB_USERNAME = 'guoshaoran';
 
 function getUserName(user: User | null) {
   const meta = user?.user_metadata;
-  return meta?.user_name || (meta as any)?.preferred_username || meta?.full_name || '';
+  return meta?.user_name || meta?.preferred_username || meta?.full_name || '';
 }
 
 export const useAuthStore = create<AuthState>((set) => ({

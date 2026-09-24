@@ -28,7 +28,7 @@ const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete }) => {
     resize();
 
     // Particle System
-    const particles: any[] = [];
+    const particles: Particle[] = [];
     const particleCount = 100;
     
     class Particle {

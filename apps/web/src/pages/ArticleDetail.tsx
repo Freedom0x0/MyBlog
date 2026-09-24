@@ -9,7 +9,7 @@ import { useAuthStore } from '../store/authStore';
 import { supabase } from '../lib/supabase';
 import MDEditor from '@uiw/react-md-editor';
 import rehypeSanitize from 'rehype-sanitize';
-import { getArticleBySlug, upsertArticle, type ArticleRecord } from '../utils/articlesApi';
+import { getArticleBySlug, upsertArticle } from '../utils/articlesApi';
 
 interface Comment {
   id: string;
@@ -26,8 +26,7 @@ const ArticleDetail: React.FC = () => {
   const [article, setArticle] = useState<Article | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editedContent, setEditedContent] = useState('');
-  const [articleRecord, setArticleRecord] = useState<ArticleRecord | null>(null);
-  
+
   const { user, isAdmin } = useAuthStore();
   const [comments, setComments] = useState<Comment[]>([]);
   const [newComment, setNewComment] = useState('');
@@ -39,7 +38,6 @@ const ArticleDetail: React.FC = () => {
     const load = async () => {
       const record = await getArticleBySlug(slug);
       if (record) {
-        setArticleRecord(record);
         setArticle({
           id: record.id,
           title: record.title,
@@ -67,24 +65,28 @@ const ArticleDetail: React.FC = () => {
   }, [slug]);
 
   useEffect(() => {
-    if (slug) {
-      fetchComments();
-    }
-  }, [slug]);
+    if (!slug) return;
 
-  const fetchComments = async () => {
-    setLoadingComments(true);
-    const { data, error } = await supabase
-      .from('comments')
-      .select('*')
-      .eq('article_slug', slug)
-      .order('created_at', { ascending: false });
-      
-    if (!error && data) {
-      setComments(data);
-    }
-    setLoadingComments(false);
-  };
+    // Defined inside the effect because nothing else calls it. Hoisting it out
+    // would leave the effect with a dependency it cannot honestly declare
+    // (the function is recreated every render), which is what the
+    // exhaustive-deps warning was pointing at.
+    const fetchComments = async () => {
+      setLoadingComments(true);
+      const { data, error } = await supabase
+        .from('comments')
+        .select('*')
+        .eq('article_slug', slug)
+        .order('created_at', { ascending: false });
+
+      if (!error && data) {
+        setComments(data);
+      }
+      setLoadingComments(false);
+    };
+
+    fetchComments();
+  }, [slug]);
 
   const handleSave = async () => {
     if (!article || !slug) return;
@@ -101,7 +103,6 @@ const ArticleDetail: React.FC = () => {
         read_time: article.readTime,
       });
       if (saved) {
-        setArticleRecord(saved);
         setArticle({
           ...article,
           content: saved.content_md,
@@ -256,14 +257,21 @@ const ArticleDetail: React.FC = () => {
           <article className="prose prose-neutral dark:prose-invert prose-blue max-w-none">
             <ReactMarkdown
               components={{
-                code({ node, inline, className, children, ...props }: any) {
+                // `node` is destructured only to keep it out of `...props`.
+                // Spreading react-markdown's AST node onto a DOM element would
+                // make React log an unknown-prop warning.
+                code({ node: _node, className, children, ...props }) {
                   const match = /language-(\w+)/.exec(className || '');
-                  return !inline && match ? (
+                  return match ? (
+                    // `...props` is deliberately NOT spread here. Those are
+                    // HTML `<code>` attributes, and SyntaxHighlighter's `style`
+                    // means something entirely different — the highlight theme.
+                    // Passing them through let an element style override the
+                    // theme object.
                     <SyntaxHighlighter
                       style={vscDarkPlus}
                       language={match[1]}
                       PreTag="div"
-                      {...props}
                     >
                       {String(children).replace(/\n$/, '')}
                     </SyntaxHighlighter>

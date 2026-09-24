@@ -8,8 +8,8 @@ export default function Header() {
   const { theme, toggleTheme } = useTheme();
 
   const displayName =
-    (user?.user_metadata as any)?.user_name ||
-    (user?.user_metadata as any)?.preferred_username ||
+    user?.user_metadata?.user_name ||
+    user?.user_metadata?.preferred_username ||
     user?.email;
 
   const handleLogin = async () => {
