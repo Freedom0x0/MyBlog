@@ -201,6 +201,16 @@ A–F 全部完成并通过验证：
 | 4 | 🟠 空的 `gateway/` 目录克隆后不存在 | 删除；改在 S5 创建 |
 | 5 | 🟡 `authStore` 自造的 `User` 接口缺 `app_metadata` | **未修，交接给 S2**（见下） |
 
+### 开 PR 之后发现的问题（非复核代理报告）
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 6 | 🔴 **Vercel 部署失败**。workspace 重构引入了 `pnpm-workspace.yaml`，Vercel 识别为 monorepo，但项目未配置 `rootDirectory`（状态载荷里是 `{"isMonorepo":true,"rootDirectory":null}`），于是从仓库根目录构建——根目录已无应用（`index.html`/`vite.config.ts` 都搬到了 `apps/web/`） | 在根 `vercel.json` 显式声明 `framework: null` + `buildCommand: pnpm --filter web build` + `outputDirectory: apps/web/dist`。推送后 Vercel 部署状态转为 success |
+
+**这次的教训是判断方法上的**：S0 的 `design.md` 把 `vercel.json` 标记为"待改，当前无生产部署"，依据是"本地无 `.vercel` 目录、仓库无部署产物"。而实际上**存在生产部署**（`cafbc83`，2026-03-23，线上 `guoshaoran-blog.vercel.app`）——Vercel 的 GitHub App 装在仓库层，本地看不到。
+
+**从"没有证据"推出"没有 X"是推理错误。** 正确做法是去查仓库的部署状态（`gh api repos/.../commits/<sha>/status`），那里一开始就有答案。
+
 ## 交接给后续阶段的事项
 
 | 事项 | 归属 | 说明 |

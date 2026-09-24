@@ -65,7 +65,10 @@
 ### 项目约束
 
 - 远程仓库：`git@github.com:Freedom0x0/MyBlog.git`，单分支 `main`，单次提交
-- 无本地 Vercel 关联（无 `.vercel`），无生产部署证据，**无真实读者** → "改造期间保持线上可用"不构成硬约束（仍按增量迁移执行，成本为零）
+- **存在生产部署（2026-09-24 更正）**：Vercel 项目 `guoshaoran-blog`，线上地址 `https://guoshaoran-blog.vercel.app`，由 `main` 的 `cafbc83`（2026-03-23）部署成功。Vercel 的 GitHub App 装在仓库上：PR 触发预览部署，合入 `main` 触发生产部署。
+- **R1「增量可用」有实际约束力**。此前判断"无真实读者，线上可用不构成硬约束"，依据是"本地无 `.vercel` 目录、仓库无部署产物"——**从"没有证据"推出"没有部署"，是推理错误**。实际情况相反。
+- 缓解一条：Vercel 在生产构建失败时**保留上一个成功部署**，所以站点不会因构建失败下线，但会**冻结、不再更新**。这仍是不小的风险，必须当作真实约束对待。
+- Vercel 项目未配置 Root Directory，而 workspace 重构引入了 monorepo 结构——已在 S0 内修复（见该任务的 `implement.md`）。
 - 时间投入：**每周 10 小时以上**
 - Trellis spec 现状：仅 `frontend` 层，且 6 个文件全为 `Status: To fill` 空模板；**后端 spec 完全缺失**
 

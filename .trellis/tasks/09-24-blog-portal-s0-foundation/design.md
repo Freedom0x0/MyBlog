@@ -48,7 +48,7 @@ pnpm --filter web build    # vite build
 | 根 `package.json` | 变为 workspace 根（`private: true`），原依赖移入 `apps/web/package.json` |
 | 根 `package-lock.json` | 删除，改用 `pnpm-lock.yaml` |
 | 根 `.env.example` | 拆两份：`apps/web/.env.example`（`VITE_*`）+ `infra/.env.example`（`POSTGRES_*`、`REDIS_*`） |
-| 根 `vercel.json` | **保留但标记待改**：SPA rewrite 指向的 `/index.html` 现在位于 `apps/web/`。当前无生产部署，S4/S8 处理前端部署时一并修正 |
+| 根 `vercel.json` | **已修正**（原计划标记为待改，但被 PR 触发的预览部署失败证明必须现在修）：workspace 重构后 Vercel 识别为 monorepo，而项目未配置 `rootDirectory`，于是从仓库根目录构建——根目录已无应用。改为在 `vercel.json` 显式声明 `framework: null` + `buildCommand` + `outputDirectory: apps/web/dist` |
 | `.vercelignore` | 同上 |
 | 根 `eslint.config.js` | 移入 `apps/web/`；`apps/api` 用自己的 |
 
