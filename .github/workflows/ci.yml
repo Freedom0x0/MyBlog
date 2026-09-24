@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to the same branch makes the running build obsolete, so cancel it.
+# Without this, a force-push queues two full runs and only the last one matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads the `packageManager` field in package.json, so the CI pnpm
+      # version cannot drift from the one developers use locally.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # Caches the pnpm store keyed on pnpm-lock.yaml.
+          cache: pnpm
+
+      - name: Install
+        # --frozen-lockfile fails if the lockfile and package.json disagree,
+        # so CI never silently resolves different versions than development.
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm -r lint
+
+      - name: Type check
+        run: pnpm -r check
+
+      - name: Test
+        # --if-present because not every package has tests yet (apps/web has
+        # none until S4), and a missing script is not a failure.
+        run: pnpm -r --if-present test
+
+      - name: Build
+        # Production artifacts must build in CI, not only on a developer machine.
+        run: pnpm -r build
+
+      - name: Verify the API build output actually resolves
+        # `tsc` emitting successfully is not evidence that the output *runs*.
+        # With moduleResolution nodenext, an extension-less relative import
+        # type-checks and then throws ERR_MODULE_NOT_FOUND from dist/. Starting
+        # the artifact without config makes it fail on the env schema — which
+        # only happens after every import has been resolved, so reaching that
+        # error is the proof we want.
+        run: |
+          set +e
+          node apps/api/dist/server.js > /tmp/api-start.log 2>&1
+          status=$?
+          cat /tmp/api-start.log
+          if [ "$status" -eq 0 ]; then
+            echo "Expected a non-zero exit without config, got 0"
+            exit 1
+          fi
+          grep -q 'DATABASE_URL' /tmp/api-start.log || {
+            echo "API did not reach config validation — an import probably failed to resolve"
+            exit 1
+          }

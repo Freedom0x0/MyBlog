@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Overrides the base's "bundler" resolution: this package is executed by
+    // Node directly, not bundled by Vite. node16/nodenext is the only mode that
+    // models Node's ESM resolution faithfully, and it requires explicit `.js`
+    // extensions on relative imports — which tsc will NOT add for you.
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "noEmit": true
+  },
+  "include": ["src"]
+}
