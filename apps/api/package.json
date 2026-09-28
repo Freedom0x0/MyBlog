@@ -9,7 +9,11 @@
     "start": "node dist/server.js",
     "check": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "migrate": "tsx --env-file-if-exists=.env src/db/migrate.ts",
+    "migrate:up": "pnpm run migrate up",
+    "migrate:down": "pnpm run migrate down all",
+    "migrate:status": "pnpm run migrate status"
   },
   "dependencies": {
     "fastify": "^5.12.5",
