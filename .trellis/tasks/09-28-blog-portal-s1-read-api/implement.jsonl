@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/architecture.md", "reason": "S1 是本仓库第一次写真正的分层代码（repository/service/routes）。该文档定义依赖方向、app.ts 不 listen、fastify-plugin 封装逃逸、nodenext 的 .js 扩展名规则——直接决定代码能否被接受"}
+{"file": ".trellis/spec/backend/conventions.md", "reason": "§8 迁移章节是 S1 的核心约束：含引号内容必须美元引号、迁移必须对 scratch 库执行而非肉眼审查、禁止修改已应用的迁移、授权不得读用户可写字段。§1-3 定义配置校验、错误契约与健康检查语义"}
+{"file": ".trellis/spec/guides/verification-checklist.md", "reason": "S1 有两个 spike 与一条『不得用构建通过冒充可访问』的要求，正对应该清单的『测删除侧也要测保留侧』『断言缺失前先确认查证位置』两条"}
+{"file": ".trae/documents/technical_architecture.md", "reason": "现状 schema 与 RLS 基线，以及 S1 要顺带修掉的 D8/D9/D10 的原始证据与行号"}

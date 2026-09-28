@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/architecture.md", "reason": "核对分层纪律是否真的成立：service 层不得出现 request/reply 或 SQL，repository 不得含业务规则，列表查询不得 select 正文"}
+{"file": ".trellis/spec/backend/conventions.md", "reason": "核对迁移与错误契约：每个迁移有可执行的 down、危险夹具逐字节读回、错误 code 必须是本项目词汇而非驱动/框架码"}
+{"file": ".trellis/spec/guides/verification-checklist.md", "reason": "核对验收是否用证据而非推断支撑，尤其『无 Supabase 凭据时应用能启动』这条必须实际执行，不能以 build 退出码代替"}
+{"file": ".trellis/tasks/09-28-blog-portal-s1-read-api/design.md", "reason": "§4.1 命名映射约定与 §4.3 错误矩阵是逐端点核对的依据；§0 两个 spike 的结论必须已填写而非待填"}

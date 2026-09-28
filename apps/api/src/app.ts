@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import Fastify, { type FastifyInstance } from 'fastify'
+import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
 import type { Config } from './config/index.js'
 import { dbPlugin } from './plugins/db.js'
 import { redisPlugin } from './plugins/redis.js'
@@ -41,6 +42,11 @@ export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInst
     requestIdHeader: 'x-request-id',
     genReqId: () => randomUUID(),
   })
+
+  // Zod is the single definition source for both validation and types, so a
+  // route's DTO is not hand-mirrored into a second type declaration.
+  app.setValidatorCompiler(validatorCompiler)
+  app.setSerializerCompiler(serializerCompiler)
 
   // Infrastructure first, so anything registered later can rely on app.db and
   // app.redis existing.

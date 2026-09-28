@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "09-24-blog-portal-s0-foundation"
+    "09-24-blog-portal-s0-foundation",
+    "09-28-blog-portal-s1-read-api"
   ],
   "parent": null,
   "relatedFiles": [],
