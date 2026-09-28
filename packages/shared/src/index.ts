@@ -149,3 +149,20 @@ export interface TagList {
  */
 export type AssertEquivalent<A, B> =
   [A] extends [B] ? ([B] extends [A] ? true : false) : false
+
+/**
+ * The signed-in identity, as returned by `GET /api/v1/auth/me`.
+ *
+ * `isAdmin` is included so the client stops guessing membership from a username
+ * constant baked into the bundle — the front-end half of defect D1. It is read
+ * from the database per request, so revoking an admin takes effect on the next
+ * page load rather than whenever a token happens to expire.
+ */
+export interface SessionUser {
+  id: string
+  login: string
+  displayName: string | null
+  avatarUrl: string | null
+  isAdmin: boolean
+}
+

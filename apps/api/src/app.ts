@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import cookie from '@fastify/cookie'
 import cors from '@fastify/cors'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
@@ -6,6 +7,8 @@ import type { Config } from './config/index.js'
 import { dbPlugin } from './plugins/db.js'
 import { redisPlugin } from './plugins/redis.js'
 import { denylistPlugin } from './plugins/denylist.js'
+import { authPlugin } from './plugins/auth.js'
+import { authRoutes } from './modules/auth/routes.js'
 import { errorHandlerPlugin } from './plugins/errorHandler.js'
 import { healthRoutes } from './routes/health.js'
 import { articleRoutes } from './modules/articles/routes.js'
@@ -76,12 +79,18 @@ export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInst
   // After redisPlugin: the denylist is stored in Redis.
   await app.register(denylistPlugin)
 
+  // Before authPlugin: requireAuth reads the access token from a cookie, and
+  // request.cookies only exists once @fastify/cookie has run.
+  await app.register(cookie)
+  await app.register(authPlugin, { config })
+
   // Registered after the plugins so it also covers errors they throw.
   await app.register(errorHandlerPlugin)
   await app.register(healthRoutes)
   await app.register(articleRoutes)
   await app.register(commentRoutes)
   await app.register(tagRoutes)
+  await app.register(authRoutes)
 
   return app
 }

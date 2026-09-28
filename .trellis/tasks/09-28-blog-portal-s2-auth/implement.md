@@ -97,6 +97,37 @@ docker compose -f infra/docker-compose.yml exec -T redis redis-cli keys 'deny:*'
 
 ---
 
+## D · 守卫与身份端点 — ✅ 完成（101 测试）
+
+`requireAuth`（验签 → 校验形状 → 查 denylist）、`requireAdmin`（**查库 `is_admin`**）、
+`GET /auth/me`、`src/db/admin.ts` CLI。签发收进唯一一处 `app.signAccessToken`，
+它无条件附加 TTL；验签额外要求 `exp` 存在——把 B 阶段发现的库缺陷补成自己的保证。
+
+### 变异检验：三次改坏实现，三次都被抓到
+
+| 变异 | 结果 |
+|---|---|
+| `requireAdmin` 不查库直接放行 | **2 failed** |
+| `requireAuth` 跳过 denylist | **2 failed** |
+| 验签不检查 `exp` | **2 failed** |
+
+**并顺带暴露一个测试卫生缺陷**：变异运行时断言失败 → 写在测试体末尾的清理代码被跳过 →
+留下孤儿行 → 之后每次运行都撞 `users_github_login_key` 唯一约束，**测试不能安全重跑**。
+修法：清理移到 `afterAll`（断言失败也会执行），插入改成 `on conflict do update`。
+修完连跑两遍均 101 全绿，可重跑性是被证明的而非假设的。
+
+同类问题还有一处：那条"后端不出现 `user_metadata`"的 grep 测试原本把**任何异常**都当作
+"无匹配=通过"，于是 git 缺失、不在仓库、cwd 错误都会让它空过。改为只接受 exit 1，
+其他状态直接抛错——否则它什么也没保证。
+
+### 边界语义（有测试固定）
+
+- 无凭证 / 篡改 / `alg:none` / 错密钥 / 过期 / **绕过唯一签发处的无 exp 令牌** → 一律 **401 同一 code**（哪种猜测失败不是调用方该知道的）
+- 已登出的 jti → **立即** 401，不等过期
+- 非管理员 → 403；**账号已删而令牌仍有效 → 401 而非 403**（身份不存在，谈不上权利）
+- `isAdmin` 每次现查库 ⇒ 撤销在**下一次请求**生效，不等令牌过期
+- D1 回归：一个 display name 与管理员完全相同的普通用户仍然 403
+
 ## D · 守卫与身份端点
 
 - [ ] `plugins/auth.ts`：`requireAuth`（验签 → 查 denylist → `req.auth`）

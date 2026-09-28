@@ -14,7 +14,8 @@
     "migrate:up": "pnpm run migrate up",
     "migrate:down": "pnpm run migrate down all",
     "migrate:status": "pnpm run migrate status",
-    "seed": "tsx --env-file-if-exists=.env src/db/seed.ts"
+    "seed": "tsx --env-file-if-exists=.env src/db/seed.ts",
+    "admin": "tsx --env-file-if-exists=.env src/db/admin.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
