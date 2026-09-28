@@ -226,9 +226,50 @@ close 后: ["SimpleWriteWrap","GetAddrInfoReqWrap","TCPSocketWrap","Immediate"] 
 
 **双向都验证过**（对称验证）：Redis 正常 → 退出码 0；Redis 指向死端口 → 仍启动、`/ready` 503 且指出 `redis: failed`、退出码 0。
 
-### SPIKE-2
+### SPIKE-2 · 通过（2026-09-28）— 采用方案 a：`shared` 产出自己的 `dist`
 
-待执行。
+`packages/shared` 现在导出**运行时值**（`ERROR_CODES`），并被 `apps/api` 在运行时 import——这正是 S0 埋下、当时判定"会冲突"的场景。
+
+**实测结论：不冲突，但有一个必要条件。**
+
+```jsonc
+// packages/shared/package.json
+"main": "./dist/index.js",
+"types": "./dist/index.d.ts",
+"exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+"scripts": { "build": "tsc -p tsconfig.json", "check": "tsc -p tsconfig.json" }
+```
+
+`apps/api` 的 `rootDir: src` 不再被触发，因为 Node 与 tsc 解析 `shared` 时走的是它的 `dist`，而不是它仓库里的源文件。**方案 c（两侧各写一份契约）没有被启用。**
+
+### ⚠️ Spike 抓到的、只有真跑才会暴露的 CI 破坏
+
+**`shared` 的 `check` 脚本必须也产出 `dist`**（即去掉 `--noEmit`）。原因：
+
+- CI 顺序是 `lint → check → test → build`，**`check` 在 `build` 之前**
+- api 的类型检查要读 `shared/dist/index.d.ts`
+- 干净检出时那一刻 `dist` 还不存在 → **`pnpm -r check` 直接红**
+
+实测证据：删掉 `packages/shared/dist` 后单独跑 `pnpm --filter api check` → **exit 1**。
+
+靠 `-r` 的拓扑顺序（shared 先于 api）+ shared 的 check 会产出，问题消失。
+
+**代价（写下来，因为它是真实的开发体验陷阱）**：单独运行 `pnpm --filter api check` 或 `pnpm --filter api test` 时，若 `shared` 从未构建过会失败。绕过方式是先 `pnpm --filter shared build`。`pnpm -r check` 不受影响。**这条待沉淀进 `.trellis/spec/backend/architecture.md`。**
+
+**最终证明**——从干净状态（三个 `dist` 全删）按 `ci.yml` 的确切顺序跑：
+
+```
+pnpm -r lint      ✓
+pnpm -r check     ✓
+pnpm -r test      ✓
+pnpm -r build     ✓
+api 产物可解析     ✓（如期失败于配置校验，说明含 shared 在内的 import 全部解析）
+```
+
+### 副作用（好的）
+
+`ERROR_CODES` 落到 shared 后，`ApiError.code` 的类型从 `string` 收紧成 `ErrorCode` 联合——**路由再也造不出前端从没听说过的错误码**。同时 `errorHandler` 里的裸字符串常量全部消失，未知 4xx 的兜底码从含糊的 `REQUEST_ERROR` 变成明确的 `BAD_REQUEST`。
+
 
 ### `EXPLAIN` 证据
 

@@ -1,6 +1,6 @@
 import fp from 'fastify-plugin'
 import type { FastifyError, FastifyInstance } from 'fastify'
-import type { ApiErrorEnvelope } from 'shared'
+import { ERROR_CODES, type ApiErrorEnvelope, type ErrorCode } from 'shared'
 import { ApiError } from '../errors.js'
 
 /**
@@ -9,17 +9,18 @@ import { ApiError } from '../errors.js'
  * Framework and driver codes must never reach the client: `FST_ERR_*` is
  * Fastify's internal naming and changes across majors, and a Postgres SQLSTATE
  * (`23505` = unique violation) describes the schema. Clients branch on these
- * codes, so they have to be ours and they have to be stable.
+ * codes, so they have to be ours and they have to be stable — hence the shared
+ * vocabulary in `packages/shared`, which the web client consumes too.
  */
-const CODE_BY_STATUS: Record<number, string> = {
-  400: 'BAD_REQUEST',
-  401: 'UNAUTHORIZED',
-  403: 'FORBIDDEN',
-  404: 'NOT_FOUND',
-  409: 'CONFLICT',
-  413: 'PAYLOAD_TOO_LARGE',
-  415: 'UNSUPPORTED_MEDIA_TYPE',
-  429: 'RATE_LIMITED',
+const CODE_BY_STATUS: Record<number, ErrorCode> = {
+  400: ERROR_CODES.badRequest,
+  401: ERROR_CODES.unauthorized,
+  403: ERROR_CODES.forbidden,
+  404: ERROR_CODES.notFound,
+  409: ERROR_CODES.conflict,
+  413: ERROR_CODES.payloadTooLarge,
+  415: ERROR_CODES.unsupportedMediaType,
+  429: ERROR_CODES.rateLimited,
 }
 
 /**
@@ -41,7 +42,7 @@ export const errorHandlerPlugin = fp(async (app: FastifyInstance): Promise<void>
   app.setNotFoundHandler((request, reply) => {
     const body: ApiErrorEnvelope = {
       error: {
-        code: 'NOT_FOUND',
+        code: ERROR_CODES.notFound,
         message: `Route ${request.method} ${request.url} not found`,
         requestId: request.id,
       },
@@ -68,9 +69,10 @@ export const errorHandlerPlugin = fp(async (app: FastifyInstance): Promise<void>
     // forwarding the code would still hand out `23505` or `FST_ERR_*`.
     const isDeliberate = error instanceof ApiError
 
-    const code = isDeliberate
-      ? error.code
-      : (CODE_BY_STATUS[status] ?? (status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR'))
+    const code: ErrorCode = isDeliberate
+      ? (error.code as ErrorCode)
+      : (CODE_BY_STATUS[status] ??
+        (status >= 500 ? ERROR_CODES.internalError : ERROR_CODES.badRequest))
 
     const body: ApiErrorEnvelope = {
       error: {

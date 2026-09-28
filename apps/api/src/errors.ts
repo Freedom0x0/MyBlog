@@ -1,3 +1,5 @@
+import type { ErrorCode } from 'shared'
+
 /**
  * An error the API raises deliberately, carrying the code the public contract
  * promises.
@@ -7,10 +9,13 @@
  * distinction it can only forward whatever `error.code` it finds, which leaks
  * the internals of whatever produced the error — `23505` from Postgres,
  * `FST_ERR_*` from Fastify — into a public API contract.
+ *
+ * `code` is typed as the shared ErrorCode union, so a route cannot invent a code
+ * the web client has never heard of.
  */
 export class ApiError extends Error {
   constructor(
-    readonly code: string,
+    readonly code: ErrorCode,
     message: string,
     readonly statusCode: number,
   ) {
