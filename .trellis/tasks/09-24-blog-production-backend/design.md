@@ -90,7 +90,7 @@ Postgres
 | 决策 | 选择 | 理由（学什么） | 被否掉的选项 |
 |---|---|---|---|
 | 数据库访问 | **裸 `pg` + 手写 SQL** | ORM 恰好隐藏了本项目最想学的东西：执行计划、索引命中、N+1、事务隔离级别、锁 | Prisma / Drizzle 会把这些包起来 |
-| 迁移工具 | **`node-pg-migrate`，迁移文件写原生 SQL** | 迁移 = 真实 SQL + 可回滚的 down | 自动生成迁移会跳过"手写 DDL"这一课 |
+| 迁移工具 | ~~`node-pg-migrate`~~ → **自写 runner（`apps/api/src/db/migrate.ts`）**。**2026-09-28 在 S1 阶段 A 推翻本行原选型** | 迁移 = 真实 SQL + 可回滚的 down | 推翻理由有两条：① 顺序、版本表、advisory lock、事务包裹、回滚协议**本身就是 R11 要学的对象**，用现成包等于划掉这门课；② **该 CLI 自己读 `DATABASE_URL`**，会把环境解析拆成两处两种失败模式，破坏 S0 定下的"配置只在 `src/config` 解析一次" |
 | 输入校验 | **Zod + `fastify-type-provider-zod`** | 一处定义同时得到运行时校验 + TS 类型，消除 DTO 与类型两份维护 | 纯 JSON Schema 性能更好（Ajv + fast-json-stringify 序列化加速），但类型要手写一遍 |
 | JWT | **`@fastify/jwt`** | 密码学部分不自己发明；签发/校验/轮换策略这些"该学的"自己写 | 手写 JWT 签名是浪费，不是学习 |
 | OAuth | **手写授权码流**（仅用 HTTP 客户端） | 授权码流、state 防 CSRF、code 换 token、scope 是核心后端知识 | 现成 OAuth 库会跳过全部流程细节 |

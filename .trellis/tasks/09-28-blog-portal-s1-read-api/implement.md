@@ -51,10 +51,33 @@ pnpm --filter api check
 
 ## A · 迁移工具链与 schema v2
 
-- [ ] 建 `apps/api/migrations/`，配 `migrate:up` / `migrate:down` / `migrate:create`
-- [ ] 写迁移 1：`users` / `articles` / `comments` + 全部索引 + 全部 check 约束（照 `design.md` §2.2）
-- [ ] 写对应 down（`drop table` 反序，注意依赖顺序）
-- [ ] **不要**在这一步引入老库数据——S1 不导 Supabase
+- [x] 建 `apps/api/migrations/`，配 `migrate` / `migrate:up` / `migrate:down` / `migrate:status`
+- [x] 写迁移 1：`users` / `articles` / `comments` + 全部索引 + 全部 check 约束（照 `design.md` §2.2）
+- [x] 写对应 down（`drop table` 反序，注意依赖顺序）
+- [x] **不要**在这一步引入老库数据——S1 不导 Supabase
+- [x] **变更**：runner 自己写，不用 `node-pg-migrate`（理由见 `design.md` §2.2 该行更新，及下方 SPIKE 结论后记）
+- [x] **补测**：批次原子性与 down 配对强制，各写成自动化用例
+
+### A 阶段实测结果
+
+```
+up      → 4 表 / 11 索引 / articles 14 列 / 2 自定义约束 / 3 外键 / 版本表=0001
+down all → 只剩 schema_migrations，版本表清空
+再 up   → 表全部回来
+重复 up → already up to date（幂等）
+```
+
+**批次原子性**（临时加 0002 成功 + 0003 失败的迁移对）：
+
+```
+rollback_a 存在? 0     rollback_b 存在? 0     版本表 0002/0003 记录? 0
+```
+
+**缺 down 文件**：`Migration 0003_bad is missing its down file.` → 拒绝执行 ✓
+
+**⚠️ 上面这组测试抓出我自己写的一个缺陷**：进度日志原本打在事务提交之前，于是回滚的批次会打印 `applied 0002_ok` —— **日志谎报了一次没有发生的成功**。已改为提交后再报告，并复测四条日志路径（reverted / applied / already / 失败批次无虚假 applied）。
+
+自动化测试：`src/db/migrate.test.ts`，8 例覆盖校验规则（含"用真实 migrations/ 目录跑一遍校验"）。api 总计 **24 passed**。
 
 **验证（这是"迁移可回滚"的硬证明）**：
 
