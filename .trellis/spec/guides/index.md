@@ -23,6 +23,7 @@ These guides help you **ask the right questions before coding**.
 |-------|---------|-------------|
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
+| [Verification Checklist](./verification-checklist.md) | Tell "I changed it" from "it works" | Before claiming anything is fixed, removed, or absent |
 
 ---
 
@@ -64,6 +65,16 @@ These guides help you **ask the right questions before coding**.
 3. **Variable misreading**: Not tracing a variable to its actual definition (e.g., Map keyed by path vs name)
 
 **Verification rule**: Every CRITICAL/WARNING finding must be verified against the actual code before prioritizing. Budget ~35% false-positive rate for AI reviews.
+
+### When Claiming Something Is Fixed, Removed, or Absent
+
+- [ ] You are about to write "done", "fixed", or "verified"
+- [ ] You removed or restricted something (did you check it still works where it should?)
+- [ ] You wrote "there is no X" based on a local search (`which`, `.vercel`, a missing file)
+- [ ] A conclusion came from reasoning about a tool's defaults rather than measuring it
+- [ ] A severity ranking is driving how much work you are about to do
+
+→ Read [Verification Checklist](./verification-checklist.md)
 
 ---
 

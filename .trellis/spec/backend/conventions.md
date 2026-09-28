@@ -209,3 +209,69 @@ allowBuilds:
 
 An allowlist entry is a deliberate decision that a package's install script may
 execute. Add one only when the failure makes clear it is required.
+
+---
+
+## 8. Migrations
+
+Plain SQL files in `supabase/migrations/`, applied in filename order. No migration
+tooling yet, so ordering and idempotency are manual.
+
+### Dollar-quote any literal that can contain a quote character
+
+Never use `'...'` for markdown, HTML, or JSON payloads. Any ASCII apostrophe inside
+terminates the literal early, and the rest of the file is then parsed as SQL.
+
+Measured failure — a migration seeding article markdown that contained a TypeScript
+example:
+
+```
+ERROR:  syntax error at or near "demo"
+LINE 6: ...eturn { data }\n}\n\nconst r = ok({ id: 1, name: 'demo' })
+```
+
+#### Wrong
+
+```sql
+update public.articles
+set content_md = '# Title\n\nconst r = ok({ id: 1, name: ''demo'' })'
+where slug = 'x';
+```
+
+Escaping every apostrophe in a code sample is fragile, and the next quoted word in
+the prose breaks it again.
+
+#### Correct
+
+```sql
+update public.articles
+set content_md = $md$
+# Title
+
+const r = ok({ id: 1, name: 'demo' })
+$md$
+where slug = 'x';
+```
+
+Choose a tag that cannot occur inside the payload (`$md$`, `$ex$`). The content is
+then byte-for-byte literal — newlines included, which is why dollar-quoted seed
+data stays readable as the markdown it actually is.
+
+**Verify by executing, not by reading.** A syntactically broken migration looks
+completely normal in an editor. Apply each migration to a scratch database and
+check the exit status; distinguish *syntax* errors (a real defect) from missing
+Supabase objects such as the `auth` schema (expected locally, not a finding).
+
+### Don't edit a migration that has already been applied
+
+- **Symptom**: the fix is in the repository but the deployed database still behaves the old way.
+- **Cause**: applied migrations are not re-run. Editing one changes *fresh* setups only — one repository, two states.
+- **Fix**: add a new migration whose SQL is idempotent by construction (`create or replace function`, `add column if not exists`).
+- **Prevention**: before touching anything under `supabase/migrations/`, ask whether it has already been applied. If yes, it is a new file, not a change.
+
+### Don't authorize on claims the user can write
+
+- **Symptom**: `is_admin()` reads `auth.jwt() -> 'user_metadata'`, so any signed-in user escalates by running `supabase.auth.updateUser({ data: { user_name: 'guoshaoran' } })` and refreshing the JWT.
+- **Why it matters here**: the anon key ships in the client bundle by design, so RLS is the *only* boundary between a browser and the table — and this places the decision on attacker-controlled input.
+- **Fix**: authorize on `app_metadata` (writable only via `service_role`), or in the self-built API on a real `users.is_admin` column. Owned by S2; see `technical_architecture.md` defect D1.
+- **Prevention**: when writing any authorization check, name the party that can write the value you are reading. If the answer is "the user", it is not an authorization input.
