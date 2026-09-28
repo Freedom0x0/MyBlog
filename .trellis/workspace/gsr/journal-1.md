@@ -39,3 +39,32 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 2: 既有缺陷清理（A 类 + D16）与 D1 的撤销
+<!-- trellis-session: v=2 fp=f6de10f729649455 -->
+
+**Date**: 2026-09-28
+**Task**: 既有缺陷清理（A 类 + D16）与 D1 的撤销
+**Branch**: `feat/s0-foundation`
+
+### Summary
+
+清理既有缺陷 6 项：D2 生产构建的 Trae 推广角标、D3 双重死代码 Projects.tsx、D4 会渲染虚构文章的 mockData 兜底、D5 实测确认语法错误的坏迁移 04、D7 脚手架标题与缺失 description，以及执行中新增的 D16——搜产物发现 react-dev-locator 把源文件路径与行号以 1020 处 trae-inspector 属性编译进生产包，改为限定 command==='serve'（生产包 1020→0，包体 2473→2369 kB，dev 侧经反向验证仍挂载）。D1 提权漏洞先实现、经独立复核验证、再撤销：理由是它与 B 类缺陷同样属于「会被 S1/S2 替换掉的代码」，且线上库里只有迁移 02 的 4 篇演示文章、无可保护内容；迁移 06 已用 git rebase --onto 从历史中整体移除（未推送，重写安全），并验证重写后仅差该文件、全部命令复跑通过。漏洞本身用桩 auth.jwt() 实测确认可利用，结论保留给 S2 用 users.is_admin 列根治。独立复核对 6 项全部重新构建实测，零确认问题；代理补上了我漏掉的对称验证（只证生产包干净、未证 dev 仍挂载），并 6 轮未能复现此前那次偶发测试失败，故改记为「无法证实」而非已知缺陷。沉淀规范：backend/conventions.md 新增迁移章节（美元引号、scratch 库实测、禁改已应用迁移、不用用户可写字段做授权），新建 guides/verification-checklist.md 记录三次「由缺失证据推出结论」的错误（which 只报 PATH、Vercel App 挂在仓库层本地无痕、autocrlf 归一化实测零内容变化）。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2604419` | fix(web): drop the Trae promo badge from production builds |
+| `7307468` | fix(web): remove the unreachable Projects page and the mock article fallback |
+| `42b4a3b` | fix(web): replace the scaffold title and add a description |
+| `f0adbf5` | chore(db): delete the broken migration 04 |
+| `bf31c0f` | docs: correct two audit records and add the defect-fix task |
+| `a4fb569` | fix(web): keep react-dev-locator out of production builds |
+| `7b5ad31` | docs(task): withdraw the D1 patch and record the scoping error behind it |
+| `c918c2d` | docs(spec): add migration rules and a verification checklist |
+
+### Status
+
+[OK] **Completed**

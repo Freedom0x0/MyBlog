@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 1
-- **Last Active**: 2026-09-24
+- **Total Sessions**: 2
+- **Last Active**: 2026-09-28
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~41 | Active |
+| `journal-1.md` | ~70 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 2 | 2026-09-28 | 既有缺陷清理（A 类 + D16）与 D1 的撤销 | `2604419`, `7307468`, `42b4a3b`, `f0adbf5`, `bf31c0f`, `a4fb569`, `7b5ad31`, `c918c2d` | `feat/s0-foundation` |
 | 1 | 2026-09-24 | S0 地基：workspace 重构 + Fastify 骨架 + CI 打通 | `91858bb`, `ff3d988`, `4c0b78e`, `cdd41ab`, `490a34d`, `8fb1b6f`, `7295e21`, `96c0d81`, `328ceee`, `66cd542`, `9f26724`, `9893bfa`, `b78b3af` | `feat/s0-foundation` |
 <!-- @@@/auto:session-history -->
 
