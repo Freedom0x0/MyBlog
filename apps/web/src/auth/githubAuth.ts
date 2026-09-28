@@ -1,8 +1,8 @@
 import type { Session } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import { getSupabase } from '../lib/supabase';
 
 export async function startGithubLogin(redirectTo: string) {
-  const { data, error } = await supabase.auth.signInWithOAuth({
+  const { data, error } = await getSupabase().auth.signInWithOAuth({
     provider: 'github',
     options: {
       redirectTo,
@@ -20,7 +20,7 @@ export async function exchangeCodeForSessionFromUrl(currentUrl: string) {
     return { session: null as Session | null, cleanedUrl: currentUrl, exchanged: false };
   }
 
-  const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+  const { data, error } = await getSupabase().auth.exchangeCodeForSession(code);
 
   url.searchParams.delete('code');
   url.searchParams.delete('state');
@@ -34,14 +34,14 @@ export async function exchangeCodeForSessionFromUrl(currentUrl: string) {
 }
 
 export async function getCurrentSession() {
-  const { data, error } = await supabase.auth.getSession();
+  const { data, error } = await getSupabase().auth.getSession();
   return { session: data.session ?? null, error };
 }
 
 export function onAuthChange(handler: (session: Session | null) => void) {
   const {
     data: { subscription },
-  } = supabase.auth.onAuthStateChange((_event, session) => {
+  } = getSupabase().auth.onAuthStateChange((_event, session) => {
     handler(session);
   });
 
@@ -49,6 +49,6 @@ export function onAuthChange(handler: (session: Session | null) => void) {
 }
 
 export async function logout() {
-  return supabase.auth.signOut();
+  return getSupabase().auth.signOut();
 }
 

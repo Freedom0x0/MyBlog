@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import cors from '@fastify/cors'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
 import type { Config } from './config/index.js'
@@ -50,6 +51,20 @@ export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInst
   // route's DTO is not hand-mirrored into a second type declaration.
   app.setValidatorCompiler(validatorCompiler)
   app.setSerializerCompiler(serializerCompiler)
+
+  /**
+   * A single allowlisted origin, and no credentials.
+   *
+   * S1's endpoints are public reads, so cookies must not be sent or honoured —
+   * `credentials: true` alongside a wildcard is the combination that turns a
+   * permissive CORS setting into a real problem. S2 moves authorisation into
+   * cookies, at which point this needs revisiting deliberately: allow the portal
+   * origin AND credentials, never `*` with both.
+   */
+  await app.register(cors, {
+    origin: config.CORS_ORIGIN,
+    credentials: false,
+  })
 
   // Infrastructure first, so anything registered later can rely on app.db and
   // app.redis existing.

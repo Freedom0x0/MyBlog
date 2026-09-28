@@ -24,6 +24,7 @@
     "react-router-dom": "^6.26.2",
     "react-syntax-highlighter": "^15.5.0",
     "rehype-sanitize": "^6.0.0",
+    "shared": "workspace:*",
     "swiper": "^11.1.14",
     "tailwind-merge": "^3.0.2",
     "zustand": "^5.0.3"

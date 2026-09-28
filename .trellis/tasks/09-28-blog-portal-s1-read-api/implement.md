@@ -270,6 +270,34 @@ mv apps/web/.env.bak apps/web/.env
 
 ---
 
+## G · 前端读路径切换 — ✅ 完成
+
+### 实测
+
+| 验证 | 结果 |
+|---|---|
+| CORS：允许 Origin 请求 | `access-control-allow-origin: http://localhost:5175` ✓ |
+| 预检 OPTIONS | 204 + allow-origin ✓ |
+| 读路径的 supabase 依赖 | `commentsApi.ts` / `apiClient.ts` **0 处**；`articlesApi.ts` 仅剩 1 处=写路径 |
+| S1-R11 惰性化 | `lib/supabase.ts` 顶层只有 import / `let client=null` / 导出函数，**无顶层 createClient、无顶层 throw** |
+| 全量闸 | lint ✓ check ✓ build ✓ test 62 ✓ |
+
+**一条差点误报**：用 `Origin: http://evil.example` 请求时，响应仍带 `access-control-allow-origin: http://localhost:5175`。看起来像漏洞，实际不是——`@fastify/cors` 配字符串时固定回显配置值，而浏览器要求该头与请求方 origin 一致才放行读取，**不匹配即拒绝**。回显一个错误的头等于拒绝，不是允许。
+
+### 接消费者才暴露的两个缺口
+
+**① `apps/web` 从没声明 `shared` 依赖** —— 于是 `Cannot find module 'shared'`。SPIKE-2 只验了 api 侧，没验 web 侧。
+
+**② DTO 少了一个客户端做决策所需的字段。** 原本 `user?.id === comment.user_id` 决定"能否删自己评论"；我设计的 `CommentAuthor` 只有 `login/displayName/avatarUrl`，**客户端因此失去了判断依据**。把 `user_id` 换成 `author.login` 会静默永不匹配——比崩溃更糟。
+
+修法是把 `author.id` 加进契约（并加测试断言 author 的键集合）。**原则：DTO 要携带客户端做决策所需的信息，不只是渲染所需的信息。**
+
+### 顺带记一笔：CORS_ORIGIN 的时序是对的
+
+S0 我删掉了这个没人读的配置项，理由就是"声明一个不消费的配置比不声明更坏"。这阶段有了第一个真实浏览器消费者，才把它加回来并配上 `@fastify/cors`。**不是当初删错，而是当时加错。**
+
+---
+
 ## 收尾
 
 - [ ] 更新 `prd.md` 验收清单，逐项打勾或标注无法验证的原因

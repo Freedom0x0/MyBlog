@@ -5,10 +5,12 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { ArrowLeft, Clock, Calendar, Tag, Edit, Save, X, MessageSquare, Trash2 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
-import { supabase } from '../lib/supabase';
+import { getSupabase } from '../lib/supabase';
 import MDEditor from '@uiw/react-md-editor';
 import rehypeSanitize from 'rehype-sanitize';
 import { getArticleBySlug, upsertArticle } from '../utils/articlesApi';
+import { listComments } from '../utils/commentsApi';
+import type { CommentNode } from 'shared';
 
 /**
  * View model for a rendered article, mapped from the snake_case `ArticleRecord`
@@ -19,7 +21,6 @@ import { getArticleBySlug, upsertArticle } from '../utils/articlesApi';
  * fallback is gone, and the type stays with the component that uses it.
  */
 interface Article {
-  id: string;
   title: string;
   slug: string;
   excerpt: string;
@@ -31,15 +32,6 @@ interface Article {
   createdAt: string;
 }
 
-interface Comment {
-  id: string;
-  article_slug: string;
-  user_id: string;
-  user_name: string;
-  avatar_url: string;
-  content: string;
-  created_at: string;
-}
 
 const ArticleDetail: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -48,7 +40,7 @@ const ArticleDetail: React.FC = () => {
   const [editedContent, setEditedContent] = useState('');
 
   const { user, isAdmin } = useAuthStore();
-  const [comments, setComments] = useState<Comment[]>([]);
+  const [comments, setComments] = useState<CommentNode[]>([]);
   const [newComment, setNewComment] = useState('');
   const [loadingComments, setLoadingComments] = useState(true);
 
@@ -66,18 +58,17 @@ const ArticleDetail: React.FC = () => {
       }
 
       setArticle({
-        id: record.id,
         title: record.title,
         slug: record.slug,
         excerpt: record.excerpt,
-        content: record.content_md,
+        content: record.content,
         category: record.category,
         tags: record.tags || [],
-        coverImage: record.cover_image || '',
-        readTime: record.read_time || 5,
-        createdAt: record.created_at,
+        coverImage: record.coverImage || '',
+        readTime: record.readTime || 5,
+        createdAt: record.publishedAt,
       });
-      setEditedContent(record.content_md);
+      setEditedContent(record.content);
     };
 
     load();
@@ -92,16 +83,16 @@ const ArticleDetail: React.FC = () => {
     // exhaustive-deps warning was pointing at.
     const fetchComments = async () => {
       setLoadingComments(true);
-      const { data, error } = await supabase
-        .from('comments')
-        .select('*')
-        .eq('article_slug', slug)
-        .order('created_at', { ascending: false });
-
-      if (!error && data) {
-        setComments(data);
+      try {
+        setComments(await listComments(slug));
+      } catch (error) {
+        // A failed comment read must not take the article page down: the article
+        // has already rendered, so degrade this panel instead of blanking it.
+        console.error('comments load failed', error);
+        setComments([]);
+      } finally {
+        setLoadingComments(false);
       }
-      setLoadingComments(false);
     };
 
     fetchComments();
@@ -148,7 +139,7 @@ const ArticleDetail: React.FC = () => {
       content: newComment.trim(),
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await getSupabase()
       .from('comments')
       .insert([commentData])
       .select();
@@ -160,7 +151,7 @@ const ArticleDetail: React.FC = () => {
   };
 
   const deleteComment = async (id: string) => {
-    const { error } = await supabase
+    const { error } = await getSupabase()
       .from('comments')
       .delete()
       .eq('id', id);
@@ -359,7 +350,7 @@ const ArticleDetail: React.FC = () => {
             <div className="mb-10 bg-card/50 p-6 rounded-xl border border-border text-center">
               <p className="text-muted-foreground mb-4">登录后参与讨论</p>
               <button
-                onClick={() => supabase.auth.signInWithOAuth({ provider: 'github' })}
+                onClick={() => getSupabase().auth.signInWithOAuth({ provider: 'github' })}
                 className="px-6 py-2 bg-primary text-primary-foreground rounded-md font-medium hover:bg-primary/90 transition-colors"
               >
                 使用 GitHub 登录
@@ -376,19 +367,19 @@ const ArticleDetail: React.FC = () => {
               {comments.map((comment) => (
                 <div key={comment.id} className="bg-card p-5 rounded-xl border border-border flex space-x-4 group">
                   <img 
-                    src={comment.avatar_url} 
-                    alt={comment.user_name} 
+                    src={comment.author.avatarUrl} 
+                    alt={comment.author.displayName} 
                     className="w-10 h-10 rounded-full border border-border flex-shrink-0"
                   />
                   <div className="flex-1">
                     <div className="flex items-center justify-between mb-2">
                       <div>
-                        <span className="font-semibold text-foreground mr-3">{comment.user_name}</span>
+                        <span className="font-semibold text-foreground mr-3">{comment.author.displayName}</span>
                         <span className="text-xs text-muted-foreground">
-                          {new Date(comment.created_at).toLocaleString('zh-CN')}
+                          {new Date(comment.createdAt).toLocaleString('zh-CN')}
                         </span>
                       </div>
-                      {(user?.id === comment.user_id || isAdmin) && (
+                      {(user?.id === comment.author.login || isAdmin) && (
                         <button
                           onClick={() => deleteComment(comment.id)}
                           className="text-red-500/50 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"

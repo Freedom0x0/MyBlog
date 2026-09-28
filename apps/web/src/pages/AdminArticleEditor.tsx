@@ -44,9 +44,9 @@ export default function AdminArticleEditor() {
         setExcerpt(record.excerpt);
         setCategory(record.category);
         setTags((record.tags || []).join(', '));
-        setCoverImage(record.cover_image ?? '');
-        setReadTime(record.read_time ?? 5);
-        setContent(record.content_md);
+        setCoverImage(record.coverImage ?? '');
+        setReadTime(record.readTime ?? 5);
+        setContent(record.content);
       }
       setLoading(false);
     };

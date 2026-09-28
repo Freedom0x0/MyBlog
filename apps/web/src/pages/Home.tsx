@@ -2,7 +2,8 @@ import HeroCarousel from '../components/HeroCarousel';
 import { motion } from 'framer-motion';
 import { useEffect, useState } from 'react';
 import { useAuthStore } from '../store/authStore';
-import { listArticles, type ArticleRecord } from '../utils/articlesApi';
+import { listArticles } from '../utils/articlesApi';
+import type { ArticleSummary } from 'shared';
 import { Link } from 'react-router-dom';
 
 // Define the GitHub project type
@@ -47,7 +48,7 @@ export default function Home() {
   const [loadingProjects, setLoadingProjects] = useState(true);
   const { session, isAdmin } = useAuthStore();
 
-  const [articles, setArticles] = useState<ArticleRecord[]>([]);
+  const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [loadingArticles, setLoadingArticles] = useState(true);
 
   useEffect(() => {
@@ -202,13 +203,13 @@ export default function Home() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
             {articles.map((article) => (
               <motion.div
-                key={article.id}
+                key={article.slug}
                 whileHover={{ y: -10 }}
                 className="bg-card rounded-2xl overflow-hidden border border-border hover:border-primary/50 transition-colors group"
               >
                 <div className="h-48 overflow-hidden relative">
                   <img
-                    src={article.cover_image ?? ''}
+                    src={article.coverImage ?? ''}
                     alt={article.title}
                     className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
                   />
@@ -223,7 +224,7 @@ export default function Home() {
                   <p className="text-muted-foreground text-sm mb-6 line-clamp-3">{article.excerpt}</p>
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-muted-foreground">
-                      {new Date(article.created_at).toLocaleDateString()}
+                      {new Date(article.publishedAt).toLocaleDateString()}
                     </span>
                     <Link
                       to={`/blog/${article.slug}`}

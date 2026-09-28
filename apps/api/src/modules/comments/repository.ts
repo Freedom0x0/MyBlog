@@ -29,7 +29,7 @@ export class CommentRepository {
   async listForArticle(articleId: string): Promise<CommentNode[]> {
     const result = await this.pool.query<CommentRow>(
       `select c.id, c.article_id, c.parent_id, c.content, c.created_at,
-              u.github_login, u.display_name, u.avatar_url
+              u.id as author_id, u.github_login, u.display_name, u.avatar_url
          from comments c
          join users u on u.id = c.user_id
          where c.article_id = $1
@@ -43,6 +43,7 @@ export class CommentRepository {
       parentId: row.parent_id,
       content: row.content,
       author: {
+        id: row.author_id,
         login: row.github_login,
         displayName: row.display_name,
         avatarUrl: row.avatar_url,
@@ -58,6 +59,7 @@ interface CommentRow {
   parent_id: string | null
   content: string
   created_at: Date
+  author_id: string
   github_login: string
   display_name: string | null
   avatar_url: string | null

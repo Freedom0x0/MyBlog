@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Session } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import { getSupabase } from '../lib/supabase';
 
 interface User {
   id: string;
@@ -41,7 +41,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ user, session, isAdmin, loading: false });
   },
   signOut: async () => {
-    await supabase.auth.signOut();
+    await getSupabase().auth.signOut();
     set({ user: null, session: null, isAdmin: false, loading: false });
   },
 }));

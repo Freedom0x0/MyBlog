@@ -7,6 +7,7 @@ export const CommentNodeSchema = z.object({
   parentId: z.uuid().nullable(),
   content: z.string(),
   author: z.object({
+    id: z.uuid(),
     login: z.string(),
     displayName: z.string().nullable(),
     avatarUrl: z.string().nullable(),

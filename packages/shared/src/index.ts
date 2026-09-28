@@ -99,6 +99,16 @@ export interface ArticlePage {
 }
 
 export interface CommentAuthor {
+  /**
+   * The author's user id.
+   *
+   * Present so the client can decide "is this mine?" without the server rendering
+   * that flag per viewer — that decision is a permission check and belongs to the
+   * requester's own identity. `login` cannot substitute for it: it is a display
+   * name the person can change, and comparing an internal uuid against a login
+   * silently never matches.
+   */
+  id: string
   login: string
   displayName: string | null
   avatarUrl: string | null

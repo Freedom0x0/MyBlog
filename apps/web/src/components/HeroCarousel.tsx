@@ -3,7 +3,7 @@ import { Swiper, SwiperSlide } from 'swiper/react';
 import { Autoplay, Navigation, Pagination, EffectFade } from 'swiper/modules';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import type { ArticleRecord } from '../utils/articlesApi';
+import type { ArticleSummary } from 'shared';
 
 // Import Swiper styles
 import 'swiper/css';
@@ -11,7 +11,7 @@ import 'swiper/css/navigation';
 import 'swiper/css/pagination';
 import 'swiper/css/effect-fade';
 
-const HeroCarousel: React.FC<{ articles: ArticleRecord[] }> = ({ articles }) => {
+const HeroCarousel: React.FC<{ articles: ArticleSummary[] }> = ({ articles }) => {
   const navigate = useNavigate();
 
   if (!articles.length) {
@@ -47,13 +47,13 @@ const HeroCarousel: React.FC<{ articles: ArticleRecord[] }> = ({ articles }) => 
         className="w-full h-full"
       >
         {articles.map((article) => (
-          <SwiperSlide key={article.id}>
+          <SwiperSlide key={article.slug}>
             <div
               className="relative w-full h-full cursor-pointer"
               onClick={() => navigate(`/blog/${article.slug}`)}
             >
               <img
-                src={article.cover_image ?? ''}
+                src={article.coverImage ?? ''}
                 alt={article.title}
                 className="absolute inset-0 w-full h-full object-cover"
               />

@@ -18,6 +18,14 @@ const EnvSchema = z.object({
   LOG_LEVEL: z
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
     .default('info'),
+
+  /**
+   * The origin the browser app is served from.
+   *
+   * Re-added in stage G with its first real consumer, not before: a config key
+   * nothing reads is worse than no config key, because it looks authoritative.
+   */
+  CORS_ORIGIN: z.string().default('http://localhost:5175'),
 })
 
 export type Config = z.infer<typeof EnvSchema>
