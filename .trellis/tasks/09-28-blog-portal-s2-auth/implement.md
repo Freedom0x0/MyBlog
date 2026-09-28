@@ -225,7 +225,7 @@ grep -rn "signInWithOAuth\|exchangeCodeForSession\|onAuthChange" apps/web/src &&
 | 登出立即失效 | ✅ | denylist 测试：登出后同一 access token 从 200 变 401 |
 | 重放检测 | ✅ | 旧 refresh 再出示 → 整族撤销，测试覆盖 |
 | Cookie 属性 | ✅ HttpOnly + SameSite(lax/strict) + 窄 Path | cookie 字符串断言；**`Secure` 由 `COOKIE_SECURE` 控制，生产必须为 true** |
-| 会话固定攻击 | ✅ | 登录成功一律新建两套凭证，不复用请求携带的 id；`state` 一次性（GETDEL） |
+| 会话固定攻击 | ✅→⚠️→✅ | 登录一律新建两套凭证、`state` 一次性（GETDEL）。**但复核发现漏了登录 CSRF**：`state` 本身是 bearer 值，受害者可被诱导完成攻击者的登录 → 已用 nonce cookie 绑定浏览器并加两条测试 |
 | 密钥只在环境、不入库 | ✅ | `JWT_SECRET` 长度启动期强制；CI 新增产物扫描步骤 |
 | 授权输入不可被用户改写 | ✅ | D1 关闭 + `user_metadata` 结构性 grep 守卫 |
 

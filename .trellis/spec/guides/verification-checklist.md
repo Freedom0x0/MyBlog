@@ -65,6 +65,27 @@ writing the fix — not after it is committed, pushed and under review.
 
 ---
 
+## A gate that reports is not a gate
+
+Twice this project a commit went in while lint or type-check was red, because the
+loop in the same command block printed a mark and continued. Verification has to
+**abort the action it guards**:
+
+```bash
+gate() { for step in lint check build; do pnpm -r "$step" >/dev/null 2>&1 || return 1; done
+         pnpm -r --if-present test >/dev/null 2>&1 || return 1; }
+gate && git commit ...   # not: gate; git commit ...
+```
+
+Related: a search that finds nothing cannot be distinguished from a search that
+looked at nothing. A structural guard (grep the source for a forbidden pattern)
+needs a **control assertion** proving the same pathspec finds something that does
+exist — otherwise a wrong relative path makes it pass forever. This project had
+exactly that: `git grep ... -- apps/api/src` run from `apps/api` scanned
+`apps/api/apps/api/src`, matched nothing, and "passed". Anchor with `:/`.
+
+---
+
 ## Three more ways a check can be quietly worthless
 
 **A 200 from a dev server is not a rendered page.** For an SPA the server returns

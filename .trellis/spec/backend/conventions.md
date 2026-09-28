@@ -347,3 +347,12 @@ env -u DATABASE_URL -u REDIS_URL node apps/api/dist/server.js
 
 **Rule:** a step that asserts a negative must have the variables under test removed,
 not merely "not set by that step".
+
+**The mirror mistake: required keys must be declared in CI too.** S2 added
+`JWT_SECRET`, `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` as required config, and CI
+kept only `DATABASE_URL`/`REDIS_URL` — so "Migrate and seed" and every integration
+suite died on a `ConfigError`. Everything was green locally because
+`apps/api/.env` exists and CI has no such file.
+
+A required config key is therefore a **CI contract**, not a local convenience: when
+`loadConfig` gains a key, `ci.yml`'s `env:` block is part of the same change.
