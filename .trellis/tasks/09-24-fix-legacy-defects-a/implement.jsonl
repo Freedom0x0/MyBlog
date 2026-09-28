@@ -1,0 +1,2 @@
+{"file": ".trae/documents/technical_architecture.md", "reason": "缺陷清单的权威来源（§7 的 D1-D11 表），每条带 file:line 锚点与严重级别。本次只做 A 类 6 项，据此定位待改位置并确认 B 类范围边界"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Pre-Modification Rule 强制要求：改任何值前先全局搜索。本任务要删一个依赖、一个插件、两个文件和一个迁移，漏查一处引用就会留下断链或死代码"}

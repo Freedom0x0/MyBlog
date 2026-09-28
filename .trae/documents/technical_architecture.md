@@ -288,7 +288,7 @@ $$;
 | 2 | 生产构建注入 Trae 推广角标 | `vite.config.ts:24` `prodOnly: true` | 🔴 P0 |
 | 3 | `Projects.tsx` 双重死代码：无路由 + `skin` 色板不存在 | `App.tsx` 无 `/projects`；`tailwind.config.js` 无 `skin` | 🟠 P1 |
 | 4 | `ArticleDetail.tsx` 仍 import `mockData` 做兜底 | `ArticleDetail.tsx:7` | 🟠 P1 |
-| 5 | 迁移 04 是坏 SQL，已被 05 重写，应删除 | `04_update_article_style.sql` 单引号字符串内含 `'JavaScript'`，必然报错 | 🟠 P1 |
+| 5 | 迁移 04 是坏 SQL，已被 05 重写，应删除 | **已本地实测确认**：Postgres 报 `syntax error at or near "demo"`。真正原因是 content_md 内 TypeScript 示例中的 `name: 'demo'` —— ASCII 单引号提前终止了 SQL 字符串字面量（**不是**早先误记的 `'JavaScript'`，那串在 `array[...]` 里，位于字符串之外）。04 与 05 更新的 3 个 slug 完全一致，删除 04 不丢内容 | 🟠 P1 |
 | 6 | 文章列表无分页，`select *` 全表 | `articlesApi.ts:15` | 🟠 P1 |
 | 7 | 无 SEO：`index.html` 零 meta，纯 CSR | `index.html` 无 description / og 标签 | 🟠 P1 |
 | 8 | `build.sourcemap: 'hidden'` 生产仍产出 sourcemap | `vite.config.ts:14`，Vercel 会暴露源码 | 🟡 P2 |
@@ -299,7 +299,7 @@ $$;
 | 13 | `useTheme` 类型 `'light'` 与 PRD 的 `nude` 不符，且无 `.light` 规则 | `useTheme.ts:3` / `index.css` | 🟢 P3 |
 | 14 | 重复依赖：两个语法高亮库、`clsx` + `tailwind-merge` | `package.json` | 🟢 P3 |
 | 15 | `README.md` 仍是 Vite 模板原文 | `README.md` | 🟢 P3 |
-| 16 | `babel-plugin-react-dev-locator` 进了生产构建 | `vite.config.ts:19` | 🟢 P3 |
+| 16 | 🔴↑ `babel-plugin-react-dev-locator` 把**源文件路径与行号编译进生产 DOM** | 实测产物 `apps/web/dist/assets/*.js` 含 `"trae-inspector-file-path":"src\pages\SplashScreen.tsx"`、`"trae-inspector-start-line":"149"` 等属性 | 🔴 **P1（原判 P3，已上调）** |
 | 17 | `canvas-confetti` 在架构文档里，实际未安装 | 文档 vs `package.json` | 🟢 P3 |
 
 ---

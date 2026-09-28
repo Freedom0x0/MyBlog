@@ -43,7 +43,7 @@
 | D2 | 🔴 生产构建注入 Trae 推广角标（`prodOnly: true`，本地不可见） | `vite.config.ts:24` |
 | D3 | 🟠 `Projects.tsx` 双重死代码：无路由，且使用的 `skin` 色板在 Tailwind 中不存在 | `src/App.tsx`、`tailwind.config.js` |
 | D4 | 🟠 文章详情仍 import `mockData` 兜底 | `src/pages/ArticleDetail.tsx:7` |
-| D5 | 🟠 迁移 04 是坏 SQL（单引号内含 `'JavaScript'`），已被 05 重写，应删除 | `supabase/migrations/04_update_article_style.sql` |
+| D5 | 🟠 迁移 04 是坏 SQL（实测：`syntax error at or near "demo"`，根因是 content_md 里 TS 示例的 `name: 'demo'` 单引号提前终止字符串），已被 05 重写，应删除 | `supabase/migrations/04_update_article_style.sql` |
 | D6 | 🟠 文章列表无分页，`select *` 全表拉取 | `src/utils/articlesApi.ts:15` |
 | D7 | 🟠 零 SEO：`index.html` 无 description/OG，标题仍为 `<title>My Trae Project</title>` | `index.html:7` |
 | D8 | 🟡 评论无 `parent_id`（PRD 要的嵌套回复未做）；管理员不能删他人评论 | `supabase/migrations/01_init_comments.sql` |
