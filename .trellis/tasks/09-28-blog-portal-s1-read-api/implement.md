@@ -93,19 +93,41 @@ pnpm --filter api migrate:up                 # 再上一次，确认幂等
 
 ---
 
-## B · 夹具与 seed（危险内容是重点，不是点缀）
+## B · 夹具与 seed（危险内容是重点，不是点缀）— ✅ 完成
 
-- [ ] 写 4 个 fixture：`hostile-quotes.md`（含 `name: 'demo'`）、`dollar-tag-collision.md`（正文含字面 `$md$`）、`cjk-emoji.md`、`oversized.md`（> 50 kB）
-- [ ] front-matter 格式：`slug / title / excerpt / category / tags / coverImage / readTime / status / publishedAt`——**这就是 S3 发布流水线的输入格式**
-- [ ] `src/db/seed.ts`：读 fixtures，按 slug upsert，幂等（跑两次结果相同）
-- [ ] 集成测试：**逐个 fixture 读回与源文件逐字节相等**
+- [x] 7 个夹具（原计划 4 个，实际拆得更细）：`hostile-quotes`（`name: 'demo'` 与 `'a', 'b'` 数组）、`dollar-tags`（字面 `$md$` / `$$` / `$SQL$`）、`cjk-emoji`（中日韩 + 组合字形 + 国旗 + 零宽字符）、`backslashes`（Windows 路径、正则、`\n` 字面量）、`oversized`（>50 kB，**实测 117,887 字节**）、`normal-published`、`draft-unpublished`
+- [x] front-matter 解析器：**刻意不做 YAML 解析器**，只支持"扁平 `key: value` + `[a, b]` 数组"，**缩进行与注释行一律拒绝**（宽松解析会把 YAML 列表读成字符串、静默灌错数据）
+- [x] `src/db/seed.ts`：按 slug upsert、**固定 UUID**（随机 UUID 会让每次运行插入新副本，那就必须靠手工清空表，而那种 seed 在 CI 里没法用）；整批单事务；**`NODE_ENV=production` 拒绝执行**
+- [x] 逐字节读回一致：已用临时脚本实测证明（阶段 F 自动化）
 
-```bash
-pnpm --filter api seed
-# 关键断言：读回比对，不是"看着差不多"
+### B 阶段实测
+
+**幂等（跑两次 seed 后查库，不是查脚本自报的数字）**：
+
+```
+articles 总数 7 / distinct slug 7 / comments 2 / users 2
+draft 1 / published 且 published_at 为空 0 / 嵌套评论 1
 ```
 
-> 迁移 04 就是死在这一类内容上（`syntax error at or near "demo"`）。**用眼睛看 SQL 文件看不出语法错误，只能执行。**
+**逐字节读回一致：7/7**
+
+```
+OK  backslashes       bytes=   219  sha=02ca777e→02ca777e
+OK  cjk-emoji         bytes=   275  sha=163b3dcc→163b3dcc
+OK  dollar-tags       bytes=   190  sha=e3926816→e3926816
+OK  draft-unpublished  bytes=    89  sha=fa1845ef→fa1845ef
+OK  hostile-quotes    bytes=   362  sha=67d95b00→67d95b00
+OK  normal-published  bytes=   122  sha=36696809→36696809
+OK  oversized         bytes=117669  sha=40eb9497→40eb9497
+```
+
+**生产守卫实测**：`Refusing to seed NODE_ENV=production — this is development data.`，退出码 1 ✓
+
+**测试**：解析器 10 例（含"正文中间的 `---` 是内容不是闭合符"这条边界）；api 累计 **34 passed**。
+
+> 迁移 04 就是死在这一类内容上（`syntax error at or near "demo"`）。**用眼睛看 SQL 文件看不出语法错误，只能执行。** 造这些夹具的动机就是把它变成可重复的断言，而不是等下一次踩到。
+>
+> 顺带一条：生成 oversized 时我自己先踩了一次——Python 里 `C:\tmp\x` 被当成转义序列，SyntaxError。改用 raw 字符串。危险内容夹具确实有效。
 
 ---
 
