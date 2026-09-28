@@ -53,8 +53,7 @@ create table refresh_tokens (
   family_id   uuid not null,                   -- 同一条链共享，供复用检测整族撤销
   issued_at   timestamptz not null default now(),
   expires_at  timestamptz not null,
-  revoked_at  timestamptz,                     -- 非空 = 已被轮换或撤销
-  client_hint text                             -- user agent 摘要，仅供排查，不作判定依据
+  revoked_at  timestamptz                      -- 非空 = 已被轮换或撤销
 );
 
 create index refresh_tokens_user    on refresh_tokens (user_id);
@@ -64,7 +63,7 @@ create index refresh_tokens_expiry  on refresh_tokens (expires_at) where revoked
 
 **down**：`drop table refresh_tokens;` + 恢复 `id` 无默认值。
 
-`client_hint` 不参与任何授权判断——把它当判定依据会造成"换了 UA 就踢人"之类的误伤。它只为人工排查留线索。
+**`client_hint` 已删除**（复核指出它从未被写入）。若将来确实需要排查线索，应连同写入路径一起加回来；保留一个永远为 NULL 的诊断列只会让人以为有这能力。若再加，也**绝不能作授权输入**——按 UA 变化判定会因浏览器小更新误踢人。
 
 ---
 
@@ -130,10 +129,11 @@ GET  /api/v1/auth/me                                          → 200 {user} | 4
 | code 交换失败 / 非 2xx | 502 | `OAUTH_EXCHANGE_FAILED` |
 | 用户信息拉取失败 | 502 | `OAUTH_PROFILE_FAILED` |
 | `return_to` 非站内相对路径 | 400 | `BAD_REQUEST` |
-| 无/无效/过期 access token | 401 | `UNAUTHORIZED` |
-| access 在 denylist 中 | 401 | `TOKEN_REVOKED` |
-| refresh 缺失/未知/过期 | 401 | `UNAUTHORIZED` |
-| **refresh 已被轮换（复用）** | 401 | `TOKEN_REUSE_DETECTED`（并撤销整族） |
+| 无 / 无效 / 过期 / **已被 denylist 拒绝** 的 access token | 401 | `UNAUTHORIZED` |
+| refresh 缺失 / 未知 / 过期 | 401 | `UNAUTHORIZED` |
+| **refresh 已被轮换（复用）** | 401 | `UNAUTHORIZED`（**并撤销整族**） |
+
+> **修订（2026-09-28 复核后）**：本节原写有 `TOKEN_REVOKED` 与 `TOKEN_REUSE_DETECTED` 两个码，实际**从未实现，也不该实现**。阶段 C 的决定是所有令牌失败在边界上同为 `UNAUTHORIZED`——区分"已撤销"与"签名无效"等于告诉调用方哪个猜测命中了存储状态。子类仅存在于日志与指标中。文档此前与代码相互矛盾。
 | 有身份但非管理员访问需管理员的接口 | 403 | `FORBIDDEN` |
 
 ### Cookie 属性
@@ -203,7 +203,28 @@ provider 基址从配置读（`OAUTH_BASE_URL`），因此**生产指向 github.
 
 **这是"两层各挡一半"的教科书写法**，注释里写清楚，别让后来者以为 SameSite 够用了。
 
+### ⚠ 上一版漏掉的一种：登录 CSRF（复核发现）
+
+`state` 单独存在时**本身就是 bearer 值**：谁持有它谁就能完成那次登录。攻击者自己跑 `start`，再把产出的 callback URL 交给受害者浏览器做**顶级导航**（GET，Lax 允许），受害者就登录到了**攻击者的身份**下——之后他发布的内容归属攻击者，而受害者毫无察觉。上面两层防护都挡不住，因为 callback 按设计是只读 GET。
+
+修法：`start` 同时生成一个 **nonce**，只通过 `portal_oauth_nonce` cookie 交给该浏览器；Redis 里存其 SHA-256，callback 必须同时出示匹配的 nonce 才继续。两条测试固定：无 nonce 拒绝、跨登录尝试的 nonce 也拒绝（变异检验：去掉这个比较会红）。
+
 ---
+
+## 7b. 身份键：不可变的 `github_id`，不是 `login`（复核发现，HIGH）
+
+`users.github_login` 原本**唯一并作为 upsert 冲突键**。GitHub 用户名可改、且释放后可被他人注册，于是：
+
+```
+原管理员改名 → 攻击者注册该名字 → OAuth upsert on conflict (github_login)
+→ 返回的是原管理员那一行 → 直接继承 is_admin 与其评论身份
+```
+
+现在以 `github_id`（GitHub 的不可变数字 id）为身份键；`github_login` **取消唯一约束**，降为显示与查找用。后果与配套改动：
+
+- provider 必须拿到 `id`，缺失即拒绝登录（宁可登录失败，也不退回用 login 做键）。
+- `admin grant <login>` 在**多行同名时必须报错**并列出候选 id。用 `order by` 挑一个，等于让权限决定取决于行序。
+- 任何仍写 `on conflict (github_login)` 的代码都不再合法——复核时**我自己的测试就踩了这条**，说明它此前正依赖那个被移除的唯一性。
 
 ## 8. 权衡记录
 

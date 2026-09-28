@@ -94,13 +94,16 @@ export async function seed(): Promise<{ articles: number; comments: number }> {
     await client.query('begin')
 
     for (const user of DEMO_USERS) {
+      // is_admin is insert-only here. Leaving it in the update set meant a seed
+      // pointed at the wrong database would silently force admin flags back to the
+      // fixture values; now a seed can neither grant nor revoke a privilege that
+      // the admin command set.
       await client.query(
         `insert into users (id, github_login, display_name, is_admin)
          values ($1, $2, $3, $4)
          on conflict (id) do update
            set github_login = excluded.github_login,
-               display_name = excluded.display_name,
-               is_admin     = excluded.is_admin`,
+               display_name = excluded.display_name`,
         [user.id, user.githubLogin, user.displayName, user.isAdmin],
       )
     }

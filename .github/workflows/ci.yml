@@ -50,9 +50,20 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+    # Every key loadConfig marks required must exist here. S2 added JWT_SECRET and
+    # the two OAuth credentials; forgetting them turns "Migrate and seed" and every
+    # integration file's beforeAll into a ConfigError, while a local run stays green
+    # because apps/api/.env exists. CI has no .env, so required keys are a CI
+    # contract, not just a local one.
     env:
       DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
       REDIS_URL: redis://localhost:6379
+      # 32+ chars because the schema enforces a minimum: a short dummy would fail
+      # the same boot check that protects production.
+      JWT_SECRET: ci-only-not-a-real-secret-0123456789abcdef
+      # Tests point OAUTH_BASE_URL at a local stub, so these never reach network.
+      OAUTH_CLIENT_ID: ci-stub-client-id
+      OAUTH_CLIENT_SECRET: ci-stub-client-secret
 
     steps:
       - uses: actions/checkout@v4

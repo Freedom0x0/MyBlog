@@ -20,11 +20,7 @@ create table refresh_tokens (
   expires_at  timestamptz not null,
 
   -- Non-null means spent: rotated away, or revoked by logout / reuse detection.
-  revoked_at  timestamptz,
-
-  -- Diagnostics only. Never an authorisation input: treating a user-agent change
-  -- as suspicious would evict people whenever their browser updates.
-  client_hint text
+  revoked_at  timestamptz
 );
 
 create index refresh_tokens_user   on refresh_tokens (user_id);

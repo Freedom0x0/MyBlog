@@ -35,7 +35,7 @@ const defaults = (): StubBehaviour => ({
   tokenStatus: 200,
   tokenBody: { access_token: 'provider-token-1' },
   userStatus: 200,
-  user: { login: 'stub-user', name: 'Stub User', avatar_url: 'https://avatar.example/a.png' },
+  user: { id: 4242, login: 'stub-user', name: 'Stub User', avatar_url: 'https://avatar.example/a.png' },
   emails: [{ email: 'primary@example.com', primary: true, verified: true }],
   reuseCode: false,
 })

@@ -2,6 +2,7 @@ import { ERROR_CODES } from 'shared'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { ApiError } from '../../errors.js'
 import { requireAuth } from '../../plugins/auth.js'
+import { AuthRepository } from './repository.js'
 
 /**
  * Requires an authenticated admin.
@@ -26,20 +27,15 @@ export async function requireAdmin(request: FastifyRequest): Promise<void> {
     throw new ApiError(ERROR_CODES.unauthorized, 'Authentication required', 401)
   }
 
-  const { rows } = await app.db.query<{ is_admin: boolean }>(
-    'select is_admin from users where id = $1',
-    [auth.sub],
-  )
+  const isAdmin = await new AuthRepository(app.db).isAdmin(auth.sub)
 
-  const user = rows[0]
-
-  // No row means the account is gone while its token is still valid. That is a
+  // null means the account is gone while its token is still valid. That is a
   // 401 (your identity no longer exists), not a 403 (you exist but lack rights).
-  if (user === undefined) {
+  if (isAdmin === null) {
     throw new ApiError(ERROR_CODES.unauthorized, 'Account no longer exists', 401)
   }
 
-  if (user.is_admin !== true) {
+  if (isAdmin !== true) {
     request.log.warn({ userId: auth.sub }, 'admin route denied')
     throw new ApiError(ERROR_CODES.forbidden, 'Administrator access required', 403)
   }

@@ -238,9 +238,13 @@ describe('D1 regression: nothing a user can write grants anything', () => {
     // partway must not make this test fail on a unique violation. Cleanup living
     // after an assertion is exactly what a failure skips — see the afterAll hook.
     const { rows } = await app.db.query<{ id: string }>(
-      `insert into users (github_login, display_name, is_admin)
-         values ('authz-impersonator', 'A', false)
-       on conflict (github_login) do update
+      // Keyed on github_id, not github_login: migration 0003 deliberately dropped
+      // the uniqueness on login because that uniqueness was the squatting
+      // vulnerability. Anything still writing `on conflict (github_login)` would
+      // now be relying on the property we removed.
+      `insert into users (github_id, github_login, display_name, is_admin)
+         values (910001, 'authz-impersonator', 'A', false)
+       on conflict (github_id) where github_id is not null do update
          set display_name = excluded.display_name, is_admin = false
        returning id`,
     )
@@ -264,9 +268,26 @@ describe('D1 regression: nothing a user can write grants anything', () => {
 
     let status = 0
     try {
-      hits = execFileSync('git', ['grep', '-n', 'user_metadata', '--', 'apps/api/src'], {
-        encoding: 'utf8',
-      })
+      hits = execFileSync(
+        'git',
+        [
+          'grep',
+          '-n',
+          'user_metadata',
+          '--',
+          // `:/` anchors the pathspec at the repository root. A plain
+          // 'apps/api/src' resolves relative to the process cwd, which under
+          // vitest is apps/api — so it looked at apps/api/apps/api/src, matched
+          // nothing, and the test passed no matter what the code said.
+          ':/apps/api/src',
+          // Excluding the guards themselves: this file and the D1 comments name the
+          // field to explain what is forbidden, and a guard that reports its own
+          // documentation would be disabled rather than satisfied.
+          ':!*/test/*',
+          ':!*.test.ts',
+        ],
+        { encoding: 'utf8' },
+      )
     } catch (error) {
       // git grep exits 1 for "no matches" — the passing case. Anything else
       // (git missing, not a repo, bad cwd) must fail the test rather than be
@@ -284,6 +305,22 @@ describe('D1 regression: nothing a user can write grants anything', () => {
 
     expect(status, 'grep must run; a swallowed error is not a pass').toBe(1)
     expect(hits.trim()).toBe('')
+    /**
+     * Guards the guard.
+     *
+     * A zero-match search is indistinguishable from a search that looked at
+     * nothing — which is exactly how the first version of this test passed while
+     * scanning a nonexistent path. So assert the same pathspec does find a token
+     * that legitimately exists in backend source. If the pathspec breaks, this
+     * fails and the emptiness above stops meaning anything.
+     */
+    const control = execFileSync(
+      'git',
+      ['grep', '-l', 'is_admin', '--', ':/apps/api/src', ':!*/test/*', ':!*.test.ts'],
+      { encoding: 'utf8' },
+    ).trim()
+
+    expect(control.length, 'pathspec scanned nothing; the check above is vacuous').toBeGreaterThan(0)
   })
 })
 

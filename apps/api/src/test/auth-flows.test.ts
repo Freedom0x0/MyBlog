@@ -7,18 +7,31 @@ import { startOAuthStub, type OAuthStub, type StubBehaviour } from './fake-oauth
 import { waitForRedis } from './wait-for-redis.js'
 
 /**
- * End-to-end against a local stub provider, following real redirects.
+ * End-to-end login flows against a local stub provider.
  *
- * The stub exists for the failure half: a code redeemed twice, a 401 from the
- * token endpoint, a 200 carrying no access_token, a profile with no login.
- * github.com will not produce those on demand, and they are exactly where a
- * hand-written code flow goes wrong. Because the provider base URL comes from
- * config, both runs exercise the same client code.
+ * The stub exists for the half of this a real provider will not perform on
+ * demand: a 401 from the token endpoint, a 200 carrying no access_token, a
+ * profile with no id, a state replayed. Those are exactly where a hand-written
+ * code flow goes wrong. The provider base URL comes from config, so the test and
+ * production runs execute the same client code.
  */
+
+const ADMIN_ID = 4242
+const INTRUDER_ID = 9999
+
+const pristine: StubBehaviour = {
+  tokenStatus: 200,
+  tokenBody: { access_token: 'provider-token-1' },
+  userStatus: 200,
+  user: { id: ADMIN_ID, login: 'stub-user', name: 'Stub User', avatar_url: 'https://avatar.example/a.png' },
+  emails: [{ email: 'primary@example.com', primary: true, verified: true }],
+  reuseCode: false,
+}
+
 let stub: OAuthStub
 let app: FastifyInstance
 
-/** Captures everything the app logs, for the leak assertions. */
+/** Captures what the service logs, for the credential-leak assertions. */
 const logged: string[] = []
 const logStream = {
   write(chunk: string) {
@@ -26,14 +39,7 @@ const logStream = {
   },
 } as unknown as NodeJS.WritableStream
 
-const pristine: StubBehaviour = {
-  tokenStatus: 200,
-  tokenBody: { access_token: 'provider-token-1' },
-  userStatus: 200,
-  user: { login: 'stub-user', name: 'Stub User', avatar_url: 'https://avatar.example/a.png' },
-  emails: [{ email: 'primary@example.com', primary: true, verified: true }],
-  reuseCode: false,
-}
+const config = loadConfig()
 
 beforeAll(async () => {
   if (process.env.DATABASE_URL === undefined || process.env.REDIS_URL === undefined) {
@@ -42,13 +48,11 @@ beforeAll(async () => {
 
   stub = await startOAuthStub()
 
-  // Configuration is parsed once at boot, so the stub URL must be in place first.
+  // Config is parsed once at boot, so the stub URL has to be in place first.
   process.env.OAUTH_BASE_URL = stub.url
   process.env.API_PUBLIC_URL = 'http://localhost:3001'
 
-  // Log to a buffer so the credential-leak assertions below can inspect what the
-  // service would have written in production.
-  app = await buildApp({ config: loadConfig(), loggerDestination: logStream as never })
+  app = await buildApp({ config: loadConfig(), loggerDestination: logStream })
   await waitForRedis(app)
 })
 
@@ -62,48 +66,95 @@ afterAll(async () => {
   await stub?.close()
 })
 
-async function login(returnTo?: string): Promise<{
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Fastify sends one Set-Cookie as a string and several as an array, so every read
+ * has to normalise. Assuming "always array" made a single-cookie response throw
+ * and the whole suite fail, which read like a broken login rather than a broken
+ * helper.
+ */
+function setCookies(headers: Record<string, unknown>): string[] {
+  const raw = headers['set-cookie']
+  if (raw === undefined) return []
+  return (Array.isArray(raw) ? raw : [raw]) as string[]
+}
+
+function cookieValue(cookies: string[], name: string): string {
+  const found = cookies.find((entry) => entry.startsWith(`${name}=`))
+  if (found === undefined) throw new Error(`no ${name} cookie; got ${JSON.stringify(cookies)}`)
+  return found.split(';')[0]!
+}
+
+interface Driven {
   statusCode: number
   location: string
   cookies: string[]
-}> {
+  body: string
+}
+
+/**
+ * start → provider → callback, carrying cookies the way a browser would.
+ *
+ * app.inject() has no cookie jar, so the login nonce has to be forwarded by hand.
+ * Passing it is not test scaffolding but part of the protocol: without it the
+ * callback must fail.
+ */
+async function driveLogin(options: {
+  returnTo?: string
+  /** Omit to prove the callback refuses an unpaired browser. */
+  withNonce?: boolean
+  /** A callback URL from a different login attempt. */
+  overrideCallback?: string
+} = {}): Promise<Driven> {
+  const { returnTo, withNonce = true, overrideCallback } = options
+
   const start = await app.inject({
     method: 'GET',
     url: `/api/v1/auth/github/start${returnTo === undefined ? '' : `?return_to=${encodeURIComponent(returnTo)}`}`,
   })
 
   const authorizeUrl = start.headers.location as string
-  // Ask the stub what it would send the browser back with, then follow it.
+  const nonceCookie = cookieValue(setCookies(start.headers), 'portal_oauth_nonce')
+
   const providerResponse = await fetch(authorizeUrl, { redirect: 'manual' })
-  const callbackUrl = providerResponse.headers.get('location')
+  const callbackLocation = providerResponse.headers.get('location')
+  if (callbackLocation === null) throw new Error('stub provider returned no redirect')
 
-  if (callbackUrl === null) throw new Error('stub provider returned no redirect')
+  const target = new URL(overrideCallback ?? callbackLocation)
 
-  const target = new URL(callbackUrl)
-  const response = await app.inject({ method: 'GET', url: `${target.pathname}${target.search}` })
+  const response = await app.inject({
+    method: 'GET',
+    url: `${target.pathname}${target.search}`,
+    headers: withNonce === false ? {} : { cookie: nonceCookie },
+  })
 
   return {
     statusCode: response.statusCode,
     location: (response.headers.location as string | undefined) ?? '',
-    cookies: (response.headers['set-cookie'] as string[] | undefined) ?? [],
+    cookies: setCookies(response.headers),
+    body: response.body,
   }
 }
 
-/** Starts a login but returns the callback URL without following it. */
-async function beginLogin(): Promise<{ authorizeUrl: string }> {
+async function login(returnTo?: string): Promise<Driven> {
+  return driveLogin({ returnTo })
+}
+
+async function loginWithProfile(githubId: number, loginName: string): Promise<Driven> {
+  stub.setBehaviour({ user: { id: githubId, login: loginName, name: null, avatar_url: null } })
+  return login()
+}
+
+/** Signs in and returns the callback URL for that same attempt, for replaying. */
+async function captureCallbackUrl(): Promise<string> {
   const start = await app.inject({ method: 'GET', url: '/api/v1/auth/github/start' })
-  return { authorizeUrl: start.headers.location as string }
+  const providerResponse = await fetch(start.headers.location as string, { redirect: 'manual' })
+
+  return providerResponse.headers.get('location')!
 }
 
-function cookie(cookies: string[], name: string): string {
-  const found = cookies.find((entry) => entry.startsWith(`${name}=`))
-  if (found === undefined) throw new Error(`no ${name} cookie set; got ${JSON.stringify(cookies)}`)
-  return found.split(';')[0]!
-}
-
-function rawCookieHeader(cookies: string[], ...names: string[]): string {
-  return names.map((name) => cookie(cookies, name)).join('; ')
-}
+// ── login ─────────────────────────────────────────────────────────────────────
 
 describe('login', () => {
   it('redirects to the provider carrying a state and our callback', async () => {
@@ -122,7 +173,7 @@ describe('login', () => {
     )
   })
 
-  it('sets both cookies with the agreed attributes', async () => {
+  it('sets session cookies with the agreed attributes', async () => {
     const result = await login('/blog/x')
 
     expect(result.statusCode).toBe(302)
@@ -134,8 +185,8 @@ describe('login', () => {
     expect(access).toMatch(/HttpOnly/i)
     expect(access).toMatch(/SameSite=Lax/i)
     expect(refresh).toMatch(/SameSite=Strict/i)
-    // The narrow path is what keeps the long-lived credential out of unrelated
-    // requests, logs and upstreams.
+    // The narrow path keeps the long-lived credential out of every unrelated
+    // request, log line and upstream.
     expect(refresh).toMatch(/Path=\/api\/v1\/auth/i)
   })
 
@@ -145,7 +196,7 @@ describe('login', () => {
     const me = await app.inject({
       method: 'GET',
       url: '/api/v1/auth/me',
-      headers: { cookie: cookie(cookies, 'portal_access') },
+      headers: { cookie: cookieValue(cookies, 'portal_access') },
     })
 
     expect(me.statusCode).toBe(200)
@@ -154,8 +205,8 @@ describe('login', () => {
   })
 
   /**
-   * Writing is_admin on the upsert's update branch would silently demote an admin
-   * the next time they signed in — a bug that shows up as nothing at all.
+   * Updating is_admin on the upsert's conflict branch would silently demote an
+   * admin at their next sign-in — a bug with no symptom except a missing button.
    */
   it('does not reset is_admin on a repeat login', async () => {
     await login()
@@ -171,17 +222,61 @@ describe('login', () => {
 
     await app.db.query('update users set is_admin = false where github_login = $1', ['stub-user'])
   })
+})
 
+// ── login CSRF ────────────────────────────────────────────────────────────────
+
+/**
+ * `state` alone is a bearer token: whoever holds it can finish that login. The
+ * nonce cookie is what ties the attempt to the browser that started it.
+ *
+ * Without that pairing an attacker runs `start`, then makes the victim's browser
+ * navigate to the resulting callback URL — a top-level GET, which SameSite=Lax
+ * permits — and the victim ends up signed in under the *attacker's* identity.
+ * Everything they then post belongs to the attacker's account, and the victim has
+ * no reason to suspect anything.
+ */
+describe('login CSRF', () => {
+  it('refuses a callback the browser did not start', async () => {
+    const result = await driveLogin({ withNonce: false })
+
+    expect(result.statusCode).toBe(400)
+    expect(result.body).not.toContain('portal_refresh=')
+  })
+
+  it('refuses a nonce from a different login attempt', async () => {
+    // Two starts: the second attempt's nonce cannot satisfy the first's state.
+    const firstCallback = await captureCallbackUrl()
+    const second = await app.inject({ method: 'GET', url: '/api/v1/auth/github/start' })
+    const mismatchedNonce = cookieValue(setCookies(second.headers), 'portal_oauth_nonce')
+
+    const target = new URL(firstCallback)
+    const response = await app.inject({
+      method: 'GET',
+      url: `${target.pathname}${target.search}`,
+      headers: { cookie: mismatchedNonce },
+    })
+
+    expect(response.statusCode).toBe(400)
+  })
+})
+
+// ── state and code handling ───────────────────────────────────────────────────
+
+describe('state', () => {
   it('rejects a second callback carrying the same state', async () => {
-    const { authorizeUrl } = await beginLogin()
-    const state = new URL(authorizeUrl).searchParams.get('state')!
+    const start = await app.inject({ method: 'GET', url: '/api/v1/auth/github/start' })
+    const nonce = cookieValue(setCookies(start.headers), 'portal_oauth_nonce')
+    const state = new URL(start.headers.location as string).searchParams.get('state')!
     const url = `/api/v1/auth/github/callback?code=code-1&state=${state}`
 
-    expect((await app.inject({ method: 'GET', url })).statusCode).toBe(302)
+    expect(
+      (await app.inject({ method: 'GET', url, headers: { cookie: nonce } })).statusCode,
+    ).toBe(302)
 
-    const second = await app.inject({ method: 'GET', url })
-    expect(second.statusCode).toBe(400)
-    expect(second.json().error.code).toBe(ERROR_CODES.invalidState)
+    const replay = await app.inject({ method: 'GET', url, headers: { cookie: nonce } })
+    expect(replay.statusCode).toBe(400)
+    expect(replay.json().error.code).toBe(ERROR_CODES.invalidState)
   })
 
   it('rejects an unknown state without contacting the provider', async () => {
@@ -190,10 +285,12 @@ describe('login', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/v1/auth/github/callback?code=code-9&state=never-issued',
+      headers: { cookie: 'portal_oauth_nonce=some-nonce' },
     })
 
     expect(response.statusCode).toBe(400)
-    // Consuming state first means a forged callback cannot burn a valid code.
+    // State first, provider second: a forged callback must not be able to burn a
+    // real code.
     expect(stub.redeemedCodes()).toHaveLength(redeemedBefore)
   })
 
@@ -201,109 +298,132 @@ describe('login', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/v1/auth/github/callback?error=access_denied&state=whatever',
+      headers: { cookie: 'portal_oauth_nonce=anything' },
     })
 
     expect(response.statusCode).toBe(400)
     expect(response.json().error.code).toBe(ERROR_CODES.oauthDenied)
   })
+})
 
+describe('provider failures', () => {
   it.each([
     ['a 401 token response', { tokenStatus: 401 } as Partial<StubBehaviour>, ERROR_CODES.oauthExchangeFailed],
-    ['a token response with no access_token', { tokenStatus: 200, tokenBody: {} } as Partial<StubBehaviour>, ERROR_CODES.oauthExchangeFailed],
-    ['a profile without a login', { user: {} } as Partial<StubBehaviour>, ERROR_CODES.oauthProfileFailed],
-    ['a failed profile response', { userStatus: 500 } as Partial<StubBehaviour>, ERROR_CODES.oauthProfileFailed],
+    ['a token response without access_token', { tokenStatus: 200, tokenBody: {} } as Partial<StubBehaviour>, ERROR_CODES.oauthExchangeFailed],
+    ['a profile without a login', { user: { id: 1 } } as Partial<StubBehaviour>, ERROR_CODES.oauthProfileFailed],
+    ['a profile without an id', { user: { login: 'noid' } } as Partial<StubBehaviour>, ERROR_CODES.oauthProfileFailed],
+    ['a 500 profile response', { userStatus: 500 } as Partial<StubBehaviour>, ERROR_CODES.oauthProfileFailed],
   ])('turns %s into a 502 with a project code', async (_label, behaviour, code) => {
     stub.setBehaviour(behaviour)
-    const { authorizeUrl } = await beginLogin()
-    const state = new URL(authorizeUrl).searchParams.get('state')!
 
-    const response = await app.inject({
-      method: 'GET',
-      url: `/api/v1/auth/github/callback?code=secret-code-value&state=${state}`,
-    })
+    const result = await login()
 
-    expect(response.statusCode).toBe(502)
-    expect(response.json().error.code).toBe(code)
-    // Provider detail never reaches the client: the body can echo the code back.
-    expect(response.body).not.toContain('secret-code-value')
+    expect(result.statusCode).toBe(502)
+    expect(JSON.parse(result.body).error.code).toBe(code)
+    // The provider body can echo the code; it never reaches the client.
+    expect(result.body).not.toContain('provider-token-1')
+  })
+})
+
+// ── identity: the squatting regression ────────────────────────────────────────
+
+/**
+ * GitHub usernames are mutable, and a released one can be registered by someone
+ * else. Keying identity on the login therefore let a stranger be resolved into the
+ * previous holder's row — with its `is_admin`.
+ *
+ * The fix keys on GitHub's immutable numeric id. These are the two directions that
+ * matter: a new account with an old name must not inherit anything, and a renamed
+ * account must stay itself.
+ */
+describe('identity is the immutable github id, not the login', () => {
+  it('gives a squatted login a fresh row instead of the previous holder\'s', async () => {
+    const owner = await login()
+    expect(owner.statusCode).toBe(302)
+    await app.db.query('update users set is_admin = true where github_login = $1', ['stub-user'])
+
+    // A different person registers the now-released name.
+    const intruder = await loginWithProfile(INTRUDER_ID, 'stub-user')
+    expect(intruder.statusCode).toBe(302)
+
+    const { rows } = await app.db.query<{ id: string; github_id: string; is_admin: boolean }>(
+      `select id, github_id::text, is_admin from users
+         where github_login = 'stub-user' order by github_id`,
+    )
+
+    // Two distinct rows rather than one merged identity.
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.github_id)).toEqual([String(ADMIN_ID), String(INTRUDER_ID)])
+    // The intruder is not an admin; the owner still is.
+    expect(rows[1]!.is_admin).toBe(false)
+    expect(rows[0]!.is_admin).toBe(true)
   })
 
+  it('follows a renamed account to its own row', async () => {
+    await loginWithProfile(ADMIN_ID, 'old-name')
+    await app.db.query('update users set is_admin = true where github_id = $1', [ADMIN_ID])
+
+    const renamed = await loginWithProfile(ADMIN_ID, 'stub-user')
+    expect(renamed.statusCode).toBe(302)
+
+    const { rows } = await app.db.query<{ is_admin: boolean }>(
+      'select is_admin from users where github_id = $1',
+      [ADMIN_ID],
+    )
+    // Same person, same row, privileges intact.
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.is_admin).toBe(true)
+  })
+})
+
+// ── open redirect ─────────────────────────────────────────────────────────────
+
+describe('return_to', () => {
   it.each([
     ['protocol-relative', '//evil.example/pwned'],
     ['backslash trick', '/\\evil.example'],
     ['absolute url', 'https://evil.example'],
-    ['scheme-relative with query', '/	//evil.example'],
-  ])('falls back to / for a %s return_to', async (_label, attempted) => {
+    ['tab then protocol-relative', '/\t//evil.example'],
+    ['space then protocol-relative', '/ /evil.example'],
+    ['CRLF injection', '/a\r\n//evil.example'],
+  ])('falls back to / for a %s value', async (_label, attempted) => {
     const result = await login(attempted)
 
-    // An open redirect here is a phishing link served from this domain.
     expect(result.statusCode).toBe(302)
     expect(result.location).toBe('/')
   })
 
   /**
-   * The boundary of what this function is for.
-   *
-   * A same-site relative path that merely *carries* a URL in its query is passed
-   * through unchanged — rejecting it would break legitimate deep links, and the
-   * destination page owns interpreting its own parameters. The guard stops the
-   * login redirect from leaving this site; it does not audit whatever
-   * `/redirect?to=...` later decides to do with `to`.
+   * The boundary of this guard. A same-site relative path that merely carries a URL
+   * in its query is passed through: rejecting it would break legitimate deep links,
+   * and the destination page owns interpreting its own parameters. The guard stops
+   * the login redirect from leaving this site.
    */
-  it('passes through a same-site path that carries a URL in its query', async () => {
+  it('passes through a same-site path carrying a URL in its query', async () => {
     const benign = '/redirect?to=https%3A%2F%2Fexample.org'
-    const { response, location } = await loginAndInspect(benign)
 
-    expect(response.statusCode).toBe(302)
-    expect(location).toBe(benign)
+    expect((await login(benign)).location).toBe(benign)
   })
 
-  async function loginAndInspect(returnTo: string) {
-    const start = await app.inject({
-      method: 'GET',
-      url: `/api/v1/auth/github/start?return_to=${encodeURIComponent(returnTo)}`,
-    })
-    const providerResponse = await fetch(start.headers.location as string, { redirect: 'manual' })
-    const target = new URL(providerResponse.headers.get('location')!)
-    const response = await app.inject({ method: 'GET', url: `${target.pathname}${target.search}` })
+  /**
+   * Percent-encoded slashes are NOT a bypass, and asserting they are would encode
+   * a wrong mental model of URL parsing.
+   *
+   * Browsers resolve the path before decoding percent-escapes, so
+   * `/%2f%2fevil.example` is one literal path segment on this site rather than a
+   * protocol-relative URL. Verified independently against Node's WHATWG URL parser
+   * (the same algorithm browsers use) — it resolves to this origin.
+   */
+  it('passes through an encoded-slash path, which does not escape', async () => {
+    const encoded = '/%2f%2fevil.example'
+    const { location } = await login(encoded)
 
-    return { response, location: (response.headers.location as string) ?? '' }
-  }
-})
-
-/**
- * Credentials must never reach the log.
- *
- * Logs get shipped, indexed and retained by systems with a much wider audience
- * than the database. A refresh token there is a live 30-day credential for anyone
- * with log access, and the JWT_SECRET would hand over the ability to mint any
- * session. Neither is visible in any other test.
- */
-describe('log hygiene', () => {
-  it('does not log the refresh token, the JWT secret, or the provider code', async () => {
-    const before = logged.length
-    const { cookies } = await login()
-    const refreshValue = cookie(cookies, 'portal_refresh').split('=')[1]!
-    const accessValue = cookie(cookies, 'portal_access').split('=')[1]!
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/v1/auth/refresh',
-      headers: { cookie: `portal_refresh=${refreshValue}`, 'x-requested-with': 'portal' },
-    })
-
-    const output = logged.slice(before).join('')
-
-    expect(output).not.toContain(refreshValue)
-    expect(output).not.toContain(configSecret)
-    // The OAuth code is single-use, but logging it would still expose a
-    // just-spent credential to anyone reading logs.
-    expect(output).not.toContain('provider-token-1')
-    expect(accessValue.length).toBeGreaterThan(0)
+    expect(location).toBe(encoded)
+    expect(new URL(location, 'https://good.example').origin).toBe('https://good.example')
   })
 })
 
-const configSecret = loadConfig().JWT_SECRET
+// ── CSRF guard on state-changing calls ────────────────────────────────────────
 
 describe('CSRF guard', () => {
   it('refuses a state-changing auth call with no custom header', async () => {
@@ -312,7 +432,7 @@ describe('CSRF guard', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/logout',
-      headers: { cookie: cookie(cookies, 'portal_refresh') },
+      headers: { cookie: cookieValue(cookies, 'portal_refresh') },
     })
 
     expect(response.statusCode).toBe(403)
@@ -325,17 +445,19 @@ describe('CSRF guard', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/logout',
-      headers: { cookie: cookie(cookies, 'portal_refresh'), 'x-requested-with': 'portal' },
+      headers: { cookie: cookieValue(cookies, 'portal_refresh'), 'x-requested-with': 'portal' },
     })
 
     expect(response.statusCode).toBe(204)
   })
 })
 
+// ── refresh and logout ────────────────────────────────────────────────────────
+
 describe('refresh and logout', () => {
   it('rotates the refresh cookie and rejects the spent value', async () => {
     const { cookies } = await login()
-    const original = cookie(cookies, 'portal_refresh')
+    const original = cookieValue(cookies, 'portal_refresh')
 
     const renewed = await app.inject({
       method: 'POST',
@@ -344,11 +466,9 @@ describe('refresh and logout', () => {
     })
     expect(renewed.statusCode).toBe(200)
 
-    const rotatedCookies = (renewed.headers['set-cookie'] as string[] | undefined) ?? []
-    const replacement = cookie(rotatedCookies, 'portal_refresh')
+    const replacement = cookieValue(setCookies(renewed.headers), 'portal_refresh')
     expect(replacement).not.toBe(original)
 
-    // Replaying the spent token fails, and takes the replacement with it.
     const replay = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/refresh',
@@ -356,6 +476,7 @@ describe('refresh and logout', () => {
     })
     expect(replay.statusCode).toBe(401)
 
+    // Reuse killed the whole family, so the legitimate replacement is dead too.
     const afterReplay = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/refresh',
@@ -365,12 +486,12 @@ describe('refresh and logout', () => {
   })
 
   /**
-   * What a cookie-clearing logout would silently miss: a bearer token copied
-   * before logout must stop working now, not at its 15-minute expiry.
+   * What cookie-clearing alone would miss: a bearer token copied before logout has
+   * to stop working now, not at its expiry.
    */
   it('logout revokes the access token immediately', async () => {
     const { cookies } = await login()
-    const access = cookie(cookies, 'portal_access')
+    const access = cookieValue(cookies, 'portal_access')
 
     const before = await app.inject({
       method: 'GET',
@@ -383,7 +504,7 @@ describe('refresh and logout', () => {
       method: 'POST',
       url: '/api/v1/auth/logout',
       headers: {
-        cookie: rawCookieHeader(cookies, 'portal_access', 'portal_refresh'),
+        cookie: `${access}; ${cookieValue(cookies, 'portal_refresh')}`,
         'x-requested-with': 'portal',
       },
     })
@@ -403,7 +524,39 @@ describe('refresh and logout', () => {
       headers: { cookie: 'portal_refresh=nonsense', 'x-requested-with': 'portal' },
     })
 
-    // Someone unable to log out is worse than a logout that had nothing to do.
+    // Someone unable to log out is worse than a logout with nothing to do.
     expect(response.statusCode).toBe(204)
+  })
+})
+
+// ── log hygiene ───────────────────────────────────────────────────────────────
+
+/**
+ * Logs are shipped, indexed and retained by systems with a far wider audience
+ * than the database: a refresh token there is a live 30-day credential, and the
+ * JWT secret would let anyone mint any session. No other test can see this leak,
+ * and by the time it is noticed in production it is everywhere.
+ *
+ * Mutation-checked: logging a raw refresh token turns this red, so it constrains
+ * behaviour rather than passing because nothing was logged.
+ */
+describe('log hygiene', () => {
+  it('does not log the refresh token, the JWT secret, or the provider token', async () => {
+    const before = logged.length
+    const { cookies } = await login()
+    const refreshValue = cookieValue(cookies, 'portal_refresh').split('=')[1]!
+
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: { cookie: `portal_refresh=${refreshValue}`, 'x-requested-with': 'portal' },
+    })
+
+    const output = logged.slice(before).join('')
+
+    expect(refreshValue.length).toBeGreaterThan(10)
+    expect(output).not.toContain(refreshValue)
+    expect(output).not.toContain(config.JWT_SECRET)
+    expect(output).not.toContain('provider-token-1')
   })
 })

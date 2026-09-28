@@ -23,21 +23,39 @@ async function setUserAdmin(login: string, isAdmin: boolean): Promise<number> {
   await client.connect()
 
   try {
-    // No upsert: silently creating a user here would hand admin rights to a typo
-    // in a login name, and the row would look legitimate afterwards.
-    const { rowCount } = await client.query(
-      'update users set is_admin = $2 where github_login = $1',
-      [login, isAdmin],
+    // Lookup only, never an upsert: creating a row for a typo'd login would hand
+    // admin rights to a name nobody meant, and the row would look legitimate.
+    const { rows } = await client.query<{ id: string }>(
+      'select id from users where github_login = $1',
+      [login],
     )
 
-    if ((rowCount ?? 0) === 0) {
+    if (rows.length === 0) {
       throw new AdminError(
         `No user with login '${login}'. They must sign in once before being ` +
           `granted access; this command never creates accounts.`,
       )
     }
 
-    return rowCount ?? 0
+    /**
+     * A login can match more than one row, by design.
+     *
+     * GitHub usernames are released on rename, so two genuinely different people
+     * can hold the same name at different times — identity is github_id, and
+     * github_login is display and lookup only. Picking one with an `order by`
+     * would make a privilege decision depend on row order, so the operator has to
+     * name the account instead.
+     */
+    if (rows.length > 1) {
+      throw new AdminError(
+        `Login '${login}' matches ${rows.length} accounts (${rows.map((r) => r.id).join(', ')}). ` +
+          `A released GitHub username can be re-registered, so logins are no longer unique. ` +
+          `Re-run against a single account's id instead.`,
+      )
+    }
+
+    await client.query('update users set is_admin = $2 where id = $1', [rows[0]!.id, isAdmin])
+    return 1
   } finally {
     await client.end()
   }

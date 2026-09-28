@@ -72,10 +72,10 @@ export class TokenStore {
     const expiresAt = new Date(Date.now() + this.refreshTtlDays * 24 * 60 * 60 * 1000)
 
     const { rows } = await this.pool.query<{ id: string }>(
-      `insert into refresh_tokens (user_id, token_hash, family_id, expires_at, client_hint)
-         values ($1, $2, $3, $4, $5)
+      `insert into refresh_tokens (user_id, token_hash, family_id, expires_at)
+         values ($1, $2, $3, $4)
          returning id`,
-      [userId, hashToken(raw), family, expiresAt, null],
+      [userId, hashToken(raw), family, expiresAt],
     )
 
     return { raw, tokenId: rows[0]!.id, familyId: family, userId, expiresAt }

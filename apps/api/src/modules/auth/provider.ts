@@ -1,6 +1,14 @@
 import type { Config } from '../../config/index.js'
 
 export interface OAuthProfile {
+  /**
+   * GitHub's immutable numeric id.
+   *
+   * Identity rows are keyed on this rather than on `login`, because a login can be
+   * renamed and then re-registered by a different person — which would otherwise
+   * resolve a stranger into whoever held that name before them.
+   */
+  githubId: number
   login: string
   displayName: string | null
   avatarUrl: string | null
@@ -119,8 +127,19 @@ export class OAuthProvider {
 
     // Checked together: narrowing `login` to a string does not narrow `user`, and
     // the fields below are read off `user` directly.
-    if (user === null || typeof login !== 'string' || login.length === 0) {
-      throw new OAuthProfileError('profile response carried no login')
+    // Both are required: accepting a profile without an id would fall back to the
+    // login as key, which is the exact weakness this closes.
+    const githubId = user?.id
+
+    if (
+      user === null ||
+      typeof login !== 'string' ||
+      login.length === 0 ||
+      typeof githubId !== 'number' ||
+      !Number.isSafeInteger(githubId) ||
+      githubId <= 0
+    ) {
+      throw new OAuthProfileError('profile response carried no usable login or id')
     }
 
     /**
@@ -144,6 +163,7 @@ export class OAuthProvider {
     }
 
     return {
+      githubId,
       login,
       displayName: typeof user.name === 'string' ? user.name : null,
       avatarUrl: typeof user.avatar_url === 'string' ? user.avatar_url : null,

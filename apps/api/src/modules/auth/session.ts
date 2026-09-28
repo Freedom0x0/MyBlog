@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import { InvalidTokenError, TokenReuseError, type TokenStore } from './token-store.js'
 
@@ -6,6 +6,9 @@ export const ACCESS_COOKIE = 'portal_access'
 export const REFRESH_COOKIE = 'portal_refresh'
 
 const STATE_PREFIX = 'oauth_state:'
+
+/** Name of the short-lived cookie that binds a login attempt to one browser. */
+export const OAUTH_NONCE_COOKIE = 'portal_oauth_nonce'
 export const STATE_TTL_SECONDS = 600
 
 /** A fresh session: the two credentials, plus the jti needed to revoke the access token. */
@@ -19,6 +22,25 @@ export interface EstablishedSession {
 }
 
 export class InvalidStateError extends Error {}
+
+/**
+ * Hashed at rest so a Redis reader cannot replay a live nonce, and compared in
+ * constant time because the difference between "wrong length" and "wrong byte" is
+ * otherwise measurable.
+ */
+function hashNonce(nonce: string): string {
+  return createHash('sha256').update(nonce, 'utf8').digest('hex')
+}
+
+function constantTimeEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+
+  let diff = 0
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  }
+  return diff === 0
+}
 
 /**
  * Session creation, OAuth state and cookie *values*.
@@ -99,14 +121,20 @@ export class SessionService {
     }
   }
 
-  /** Stores a one-time state record and returns where to send the browser. */
-  async beginLogin(returnTo: string | undefined): Promise<string> {
+  /**
+   * Starts a login attempt and returns its authorize URL.
+   *
+   * `nonce` is a second secret minted at the same time and sent back to *this*
+   * browser as a cookie. Storing only its hash means the Redis record cannot be
+   * turned into a valid callback by someone who guesses or reads a state value.
+   */
+  async beginLogin(returnTo: string | undefined, nonce: string): Promise<string> {
     const state = randomUUID()
     const { API_PUBLIC_URL, OAUTH_REDIRECT_PATH } = this.app.config
 
     await this.app.redis.set(
       `${STATE_PREFIX}${state}`,
-      JSON.stringify({ returnTo: safeReturnTo(returnTo) }),
+      JSON.stringify({ returnTo: safeReturnTo(returnTo), nonceHash: hashNonce(nonce) }),
       { NX: true, EX: STATE_TTL_SECONDS },
     )
 
@@ -119,7 +147,19 @@ export class SessionService {
    * GETDEL is atomic, so two concurrent callbacks carrying the same state cannot
    * both redeem it. A read-then-delete pair would leave that window open.
    */
-  async consumeState(state: string): Promise<{ returnTo: string }> {
+  /**
+   * Consumes a state value once, and proves the caller is the browser that started
+   * the login.
+   *
+   * Without the nonce half, state is a bearer token: an attacker runs `start`
+   * themselves, then makes the victim's browser navigate to the resulting callback
+   * URL — a top-level GET, which SameSite=Lax permits — and the victim finishes in
+   * a session under the *attacker's* identity. Anything the attacker can post
+   * comments to in S3 then belongs to them, and the victim believes they are signed
+   * in as themselves. That is login CSRF, and the usual SameSite/CSRF-header
+   * defences do not cover it because the callback is a read-only GET by design.
+   */
+  async consumeState(state: string, presentedNonce: string | undefined): Promise<{ returnTo: string }> {
     const raw = await this.app.redis.getDel(`${STATE_PREFIX}${state}`)
 
     if (raw === null) {
@@ -133,9 +173,19 @@ export class SessionService {
       throw new InvalidStateError('state record was unreadable')
     }
 
-    const returnTo = (parsed as { returnTo?: unknown })?.returnTo
+    const record = parsed as { returnTo?: unknown; nonceHash?: unknown }
 
-    return { returnTo: safeReturnTo(typeof returnTo === 'string' ? returnTo : undefined) }
+    // Compared after the delete, never before: a guesser must not be able to probe
+    // live state values, and GETDEL already burned the attempt either way.
+    if (
+      typeof presentedNonce !== 'string' ||
+      typeof record.nonceHash !== 'string' ||
+      !constantTimeEquals(record.nonceHash, hashNonce(presentedNonce))
+    ) {
+      throw new InvalidStateError('state was not paired with this browser')
+    }
+
+    return { returnTo: safeReturnTo(typeof record.returnTo === 'string' ? record.returnTo : undefined) }
   }
 
   /** Clears a session's tokens without an UnknownToken-vs-expired distinction. */
