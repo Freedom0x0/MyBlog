@@ -65,14 +65,6 @@ writing the fix — not after it is committed, pushed and under review.
 
 ---
 
-## Related
-
-- [Backend conventions](../backend/conventions.md) §8 — migrations must be executed against a scratch database, never reviewed by eye
-- [Code Reuse guide](./code-reuse-thinking-guide.md) — search before modifying
-- [Cross-Layer guide](./cross-layer-thinking-guide.md) — bugs live at boundaries
-
----
-
 ## Three more ways a check can be quietly worthless
 
 **A 200 from a dev server is not a rendered page.** For an SPA the server returns
@@ -95,3 +87,12 @@ Prefer per-edit reporting over all-or-nothing when a batch has independent items
 
 ---
 
+---
+
+---
+
+## Related
+
+- [Backend conventions](../backend/conventions.md) §8–§10 — migrations must be executed against a scratch database; `ORDER BY` must match the index expression; GIN serves only `@>`; job-level CI env is visible to every step
+- [Code Reuse guide](./code-reuse-thinking-guide.md) — search before modifying
+- [Cross-Layer guide](./cross-layer-thinking-guide.md) — bugs live at boundaries
