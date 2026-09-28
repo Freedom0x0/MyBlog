@@ -208,25 +208,41 @@ api 测试 **58 passed / 8 files**；`lint / check / build` 全绿。
 
 ---
 
-## E · 标签读 API
+## E · 标签读 API — ✅ 完成
 
-- [ ] `GET /api/v1/tags`：`unnest(tags)` 聚合计数
-- [ ] `GET /api/v1/tags/:tag`：`tags @> array[$1]` + 复用 C 的分页
+- [x] `GET /api/v1/tags`：`unnest(tags)` 聚合计数
+- [x] `GET /api/v1/tags/:tag`：**复用 `ArticleService.list`**，不重查一遍
+- [x] 把阶段 C 遗留在 `ArticleRepository` 里的未使用方法 `listTags` 移入 `TagRepository`（留着就是死代码）
 
----
+`/tags/:tag` 直接走文章列表服务，因此 draft 规则、游标、limit 上下界**只有一份实现**。它的 query 也复用 `ListQuerySchema`——否则边界会漂移。路径参数覆盖 `?tag=`，避免客户端自称一个过滤器却拿到更宽的结果。
 
-## F · 集成测试与 CI
+## F · 集成测试与 CI — ✅ 完成（部分提前到 C/D 做掉）
 
-- [ ] `src/test/` 建测试库引导（独立库名，不碰开发库）
-- [ ] 逐端点覆盖 `design.md` §4.3 错误矩阵的每一行
-- [ ] 覆盖：draft 在列表与详情均不可见（**安全边界，不是可选用例**）
-- [ ] CI 加 Postgres service container + 跑迁移 + 跑 seed
+- [x] 逐端点覆盖 `design.md` §4.3 错误矩阵
+- [x] draft 在列表、详情、**评论端点**三处均不可见（评论那条还断言响应体不含草稿评论内容）
+- [x] CI 加 Postgres service container + migrate + seed（在阶段 C 一并做了，否则集成测试会红）
+- [x] **修掉测试自身的脆弱性**（见下）
 
-**验证**：
+### 测试数据假设：从"恰好等于全表"改为对多余数据稳健
 
-```bash
-pnpm -r lint && pnpm -r check && pnpm -r --if-present test && pnpm -r build
-```
+原来的 page-walk 断言"遍历结果 == 6 个 seed slug"，这**假设数据库里只有 seed 数据**。CI 的库确实是新建的，但本地任何人手工插一篇文章，测试就会红在无关原因上——这种失败会训练人去忽略红灯。
+
+改法是拆开两类断言：
+
+- **成员类**（seed 的 6 篇都被遍历到）→ 改为逐个 `toContain`，多出行不影响
+- **安全类**（draft 绝不出现、无重复）→ **保持严格**
+
+`count === 1` 同理改成 `>= 1`，而"草稿专属标签必须不出现"保持精确断言。
+
+**并且实测证明，不是自我声明**：临时插入一篇 seed 之外的已发布文章 + 一个标签，重跑仍 **62 passed**，随后清理。
+
+### 关于 Redis service 的一个回报
+
+CI 只加了 Postgres、**没有 Redis**。集成测试用 `buildApp()` 起真实例，若 Redis 不可达仍会阻塞启动（阶段 0 修复之前），这些测试就根本跑不起来。这是那次修复的直接收益。
+
+### 状态
+
+api **62 passed / 9 files**；`lint / check / build` 全绿。
 
 ---
 

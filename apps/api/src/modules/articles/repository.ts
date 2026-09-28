@@ -160,18 +160,6 @@ export class ArticleRepository {
     }
   }
 
-  /** Distinct tags with counts, newest-tag first at equal counts. */
-  async listTags(): Promise<{ tag: string; count: number }[]> {
-    const result = await this.pool.query<{ tag: string; count: string }>(
-      `select tag, count(*)::text as count
-         from articles, unnest(tags) as tag
-         where status = 'published'
-         group by tag
-         order by count(*) desc, tag asc`,
-    )
-
-    return result.rows.map((row) => ({ tag: row.tag, count: Number(row.count) }))
-  }
 }
 
 /** Shape of a row as Postgres returns it. Snake_case is correct here and only here. */

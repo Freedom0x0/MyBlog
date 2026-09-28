@@ -72,17 +72,23 @@ describe('GET /api/v1/articles', () => {
       cursor = body.next.cursor
     }
 
-    const expected = [
+    // The six slugs the seed publishes. Asserted as "all present", not "exactly
+    // these": equality against the full table would fail for a reason unrelated to
+    // pagination the moment anyone adds an article to a local database. The
+    // security-relevant half stays strict — the draft must not appear at all.
+    const seededPublished = [
       'backslashes',
       'cjk-emoji',
       'dollar-tags',
       'hostile-quotes',
       'normal-published',
       'oversized',
-    ].sort()
+    ]
 
-    // 6 published fixtures exist; the draft must never surface.
-    expect(seen.sort()).toEqual(expected)
+    for (const slug of seededPublished) {
+      expect(seen, `missing ${slug} after the page walk`).toContain(slug)
+    }
+    expect(seen).not.toContain('draft-unpublished')
     // A duplicated row would show up as the same slug twice in one walk.
     expect(new Set(seen).size).toBe(seen.length)
   })
