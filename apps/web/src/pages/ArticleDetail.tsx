@@ -4,12 +4,32 @@ import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { ArrowLeft, Clock, Calendar, Tag, Edit, Save, X, MessageSquare, Trash2 } from 'lucide-react';
-import { mockArticles, Article } from '../utils/mockData';
 import { useAuthStore } from '../store/authStore';
 import { supabase } from '../lib/supabase';
 import MDEditor from '@uiw/react-md-editor';
 import rehypeSanitize from 'rehype-sanitize';
 import { getArticleBySlug, upsertArticle } from '../utils/articlesApi';
+
+/**
+ * View model for a rendered article, mapped from the snake_case `ArticleRecord`
+ * the data layer returns. Declared here because this page is its only consumer.
+ *
+ * It used to come from `utils/mockData`, a module whose only other export was
+ * the hardcoded fallback that showed invented content for unknown slugs — that
+ * fallback is gone, and the type stays with the component that uses it.
+ */
+interface Article {
+  id: string;
+  title: string;
+  slug: string;
+  excerpt: string;
+  content: string;
+  category: string;
+  tags: string[];
+  coverImage: string;
+  readTime: number;
+  createdAt: string;
+}
 
 interface Comment {
   id: string;
@@ -37,28 +57,27 @@ const ArticleDetail: React.FC = () => {
 
     const load = async () => {
       const record = await getArticleBySlug(slug);
-      if (record) {
-        setArticle({
-          id: record.id,
-          title: record.title,
-          slug: record.slug,
-          excerpt: record.excerpt,
-          content: record.content_md,
-          category: record.category,
-          tags: record.tags || [],
-          coverImage: record.cover_image || '',
-          readTime: record.read_time || 5,
-          createdAt: record.created_at,
-        });
-        setEditedContent(record.content_md);
+
+      if (!record) {
+        // Leave `article` null so the `!article` guard below renders
+        // "文章未找到". This path used to fall back to hardcoded mock data, so
+        // any unknown slug displayed invented content instead of saying no.
         return;
       }
 
-      const found = mockArticles.find((a) => a.slug === slug);
-      if (found) {
-        setArticle(found);
-        setEditedContent(found.content);
-      }
+      setArticle({
+        id: record.id,
+        title: record.title,
+        slug: record.slug,
+        excerpt: record.excerpt,
+        content: record.content_md,
+        category: record.category,
+        tags: record.tags || [],
+        coverImage: record.cover_image || '',
+        readTime: record.read_time || 5,
+        createdAt: record.created_at,
+      });
+      setEditedContent(record.content_md);
     };
 
     load();
