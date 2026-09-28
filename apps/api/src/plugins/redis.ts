@@ -51,19 +51,52 @@ export const redisPlugin = fp(
      * outage prevent startup entirely — asymmetric with Postgres, whose Pool
      * connects lazily — and turned an outage into a crash loop.
      *
-     * `reconnectStrategy` keeps retrying, so this promise usually stays pending
-     * rather than rejecting; the catch is for the case where it does reject.
+     * Both settle paths are recorded so onClose can act on them: `reconnecting`
+     * resolves false rather than rejecting, so no floating rejection escapes.
      */
-    client.connect().catch((error: unknown) => {
-      app.log.error({ err: error }, 'initial redis connection failed; retrying in background')
-    })
+    const reconnecting = client.connect().then(
+      () => true,
+      (error: unknown) => {
+        app.log.error({ err: error }, 'initial redis connection failed; retrying in background')
+        return false
+      },
+    )
 
     app.decorate('redis', client)
 
+    /**
+     * Not awaiting connect() has a consequence that only shows up at shutdown:
+     * calling destroy() while the first connect is still in flight leaks the
+     * socket and the pending DNS lookup. Measured — `app.close()` then returns
+     * with `TCPSocketWrap` and `GetAddrInfoReqWrap` still active and the process
+     * never exits, which would hang integration tests and force the orchestrator
+     * to SIGKILL on every deploy.
+     *
+     * So: give the in-flight attempt a bounded moment to settle, then shut the
+     * client down through its own async API — quit() when it reached the server,
+     * disconnect() when it did not.
+     */
     app.addHook('onClose', async () => {
-      // destroy() rather than quit(): quit() sends a command over the wire and
-      // would reject if the initial connection never succeeded.
-      client.destroy()
+      await Promise.race([reconnecting, delay(SETTLE_CONNECT_MS)])
+
+      try {
+        if (client.isReady) {
+          await client.quit()
+        } else {
+          await client.disconnect()
+        }
+      } catch (error) {
+        // Already unreachable — nothing left to release, and shutdown must not
+        // fail because a dependency that was never reachable now refuses goodbye.
+        app.log.warn({ err: error }, 'redis shutdown skipped')
+      }
     })
   },
 )
+
+/** Time given to an in-flight first connect before forcing the shutdown path. */
+const SETTLE_CONNECT_MS = 1_000
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
