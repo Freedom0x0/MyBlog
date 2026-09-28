@@ -122,11 +122,15 @@ describe('GET /api/v1/articles', () => {
   })
 
   it('filters by tag and by category', async () => {
+    // Membership, not equality: an unrelated article someone adds locally that also
+    // carries the tag must not fail this test. The strict half — drafts never
+    // appearing — is asserted separately above.
     const byTag = await get<ArticlePage>('/api/v1/articles?tag=emoji&limit=10')
-    expect(byTag.body.data.map((a) => a.slug)).toEqual(['cjk-emoji'])
+    expect(byTag.body.data.map((a) => a.slug)).toContain('cjk-emoji')
+    expect(byTag.body.data.map((a) => a.slug)).not.toContain('draft-unpublished')
 
     const byCategory = await get<ArticlePage>('/api/v1/articles?category=Unicode&limit=10')
-    expect(byCategory.body.data.map((a) => a.slug)).toEqual(['cjk-emoji'])
+    expect(byCategory.body.data.map((a) => a.slug)).toContain('cjk-emoji')
 
     const nothing = await get<ArticlePage>('/api/v1/articles?tag=no-such-tag&limit=10')
     expect(nothing.body.data).toEqual([])

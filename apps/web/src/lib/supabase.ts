@@ -3,6 +3,21 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 let client: SupabaseClient | null = null
 
 /**
+ * Whether sign-in is configured at all.
+ *
+ * Callers use this to *skip* the auth bootstrap instead of letting it throw. The
+ * lazy `getSupabase` fixed when the exception happens, not whether the app can
+ * start: `App.tsx` calls `onAuthChange` synchronously in its mount effect, so a
+ * throw there still unmounted the tree — with no error boundary, a blank page.
+ * Browsing needs the API, not Supabase; this makes that true.
+ */
+export function hasSupabaseCredentials(): boolean {
+  return Boolean(
+    import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY,
+  )
+}
+
+/**
  * Lazily constructed, and only for what still lives in Supabase: GitHub OAuth
  * until S2, and comment/article writes until S3.
  *

@@ -8,6 +8,7 @@ import { AnimatePresence } from 'framer-motion';
 import { useAuthStore } from './store/authStore';
 import Header from './components/Header';
 import { exchangeCodeForSessionFromUrl, getCurrentSession, onAuthChange } from './auth/githubAuth';
+import { hasSupabaseCredentials } from './lib/supabase';
 
 function App() {
   const [showSplash, setShowSplash] = useState(true);
@@ -17,6 +18,13 @@ function App() {
     const hasShownSplash = sessionStorage.getItem('hasShownSplash');
     if (hasShownSplash) {
       setShowSplash(false);
+    }
+
+    // Without credentials there is no session to restore: stay a logged-out
+    // visitor and let the reads work, rather than throwing during mount.
+    if (!hasSupabaseCredentials()) {
+      setUser(null, null);
+      return;
     }
 
     const initAuth = async () => {
@@ -30,7 +38,12 @@ function App() {
       setUser(current.session?.user ?? null, current.session);
     };
 
-    initAuth();
+    initAuth().catch((error) => {
+      // A failed session restore must not blank the page: the visitor is simply
+      // logged out, and the content they came for is served by the portal API.
+      console.error('auth init failed', error);
+      setUser(null, null);
+    });
 
     const unsubscribe = onAuthChange((session) => {
       setUser(session?.user ?? null, session);

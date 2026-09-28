@@ -38,7 +38,8 @@ describe('GET /api/v1/tags/:tag', () => {
     const { status, body } = await get<ArticlePage>('/api/v1/tags/emoji?limit=2')
 
     expect(status).toBe(200)
-    expect(body.data.map((a) => a.slug)).toEqual(['cjk-emoji'])
+    // Membership, not equality — see the same reasoning in articles.test.ts.
+    expect(body.data.map((a) => a.slug)).toContain('cjk-emoji')
     expect(body.next).toBeNull()
     expect(body.limit).toBe(2)
   })

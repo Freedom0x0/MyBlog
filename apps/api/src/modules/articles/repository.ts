@@ -99,8 +99,11 @@ export class ArticleRepository {
     }
 
     if (params.tag !== undefined) {
-      // Array containment, which is what the GIN index on tags can serve.
-      conditions.push(`${param()} = any (tags)`)
+      // `@>` and nothing else: the GIN index only serves the containment
+      // operator. `$tag = any (tags)` reads as the same question to a human but
+      // is a post-scan Filter that can never touch articles_tags_gin, turning a
+      // tag page into a full scan of the published set.
+      conditions.push(`tags @> array[$${values.length + 1}]::text[]`)
       values.push(params.tag)
     }
 
@@ -127,7 +130,10 @@ export class ArticleRepository {
       `select ${LIST_COLUMNS}
          from articles
          where ${conditions.join('\n           and ')}
-         order by published_at desc, id desc
+         -- must match the index expression exactly, including NULLS LAST:
+         -- without it the planner cannot use the index for ordering and
+         -- falls back to a sort over the whole filtered set.
+         order by published_at desc nulls last, id desc
          limit ${limitParam}`,
       values,
     )

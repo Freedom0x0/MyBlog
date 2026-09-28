@@ -90,7 +90,10 @@ jobs:
         # error is the proof we want.
         run: |
           set +e
-          node apps/api/dist/server.js > /tmp/api-start.log 2>&1
+          # env -u: DATABASE_URL/REDIS_URL are set job-level for the test DB, so
+          # this step must unset them — otherwise the server starts, listens and
+          # never exits, and the step hangs until the job times out.
+          env -u DATABASE_URL -u REDIS_URL node apps/api/dist/server.js > /tmp/api-start.log 2>&1
           status=$?
           cat /tmp/api-start.log
           if [ "$status" -eq 0 ]; then

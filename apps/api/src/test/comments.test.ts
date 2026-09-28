@@ -58,6 +58,15 @@ describe('GET /api/v1/articles/:slug/comments', () => {
     // No denormalised name/avatar columns reach the client.
     expect(body.data[0]).not.toHaveProperty('user_name')
     expect(body.data[0]).not.toHaveProperty('avatar_url')
+
+    // The client's "is this mine?" check needs the author's id. A shape carrying
+    // only a login compiles, runs, and silently never matches a uuid.
+    expect(Object.keys(body.data[0]!.author).sort()).toEqual([
+      'avatarUrl',
+      'displayName',
+      'id',
+      'login',
+    ])
   })
 
   it('answers 404 for a draft — the same rule the article endpoint uses', async () => {

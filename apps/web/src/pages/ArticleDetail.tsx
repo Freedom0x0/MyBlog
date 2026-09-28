@@ -139,14 +139,23 @@ const ArticleDetail: React.FC = () => {
       content: newComment.trim(),
     };
 
-    const { data, error } = await getSupabase()
-      .from('comments')
-      .insert([commentData])
-      .select();
+    const { error } = await getSupabase().from('comments').insert([commentData]);
 
-    if (!error && data) {
-      setComments([data[0], ...comments]);
+    if (!error) {
       setNewComment('');
+      /**
+       * Re-read through the API instead of prepending the inserted row.
+       *
+       * The Supabase row is snake_case and has no `author` object, so splicing it
+       * into CommentNode[] rendered fields that do not exist. Refetching also keeps
+       * one shape for the list and lets the server's ordering and author join apply
+       * to the new comment — the write path still lives in Supabase until S3.
+       */
+      try {
+        setComments(await listComments(slug));
+      } catch (refetchError) {
+        console.error('comments refresh failed', refetchError);
+      }
     }
   };
 
@@ -379,7 +388,7 @@ const ArticleDetail: React.FC = () => {
                           {new Date(comment.createdAt).toLocaleString('zh-CN')}
                         </span>
                       </div>
-                      {(user?.id === comment.author.login || isAdmin) && (
+                      {(user?.id === comment.author.id || isAdmin) && (
                         <button
                           onClick={() => deleteComment(comment.id)}
                           className="text-red-500/50 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
