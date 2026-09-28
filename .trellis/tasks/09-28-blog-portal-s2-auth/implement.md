@@ -213,9 +213,30 @@ grep -rn "signInWithOAuth\|exchangeCodeForSession\|onAuthChange" apps/web/src &&
 
 ---
 
-## OWASP 会话管理清单结论（执行时填写）
+## OWASP 会话管理清单结论（2026-09-28，逐条核过）
 
-待填。
+| 检查项 | 结论 | 证据 |
+|---|---|---|
+| 凭证不出现在日志 | ✅ | `auth-flows.test.ts` 捕获真实日志流断言；**变异检验证明有牙齿**（故意 log refresh 原文 → 该测试变红） |
+| 凭证强度 | ✅ 256 bit 随机 | `generateRefreshToken()` + 测试断言 base64url 解出 32 字节 |
+| 静态存储不可逆 | ✅ 只存 SHA-256 | 测试断言库中值 == `sha256(raw)` 且不含明文 |
+| 会话与账户绑定 | ✅ | `refresh_tokens.user_id` 外键；`/auth/me` 按 `sub` 查库 |
+| 空闲超时 | ✅ 双层 | access 15 分钟、refresh 30 天；**无绝对会话上限**（见下方缺口） |
+| 登出立即失效 | ✅ | denylist 测试：登出后同一 access token 从 200 变 401 |
+| 重放检测 | ✅ | 旧 refresh 再出示 → 整族撤销，测试覆盖 |
+| Cookie 属性 | ✅ HttpOnly + SameSite(lax/strict) + 窄 Path | cookie 字符串断言；**`Secure` 由 `COOKIE_SECURE` 控制，生产必须为 true** |
+| 会话固定攻击 | ✅ | 登录成功一律新建两套凭证，不复用请求携带的 id；`state` 一次性（GETDEL） |
+| 密钥只在环境、不入库 | ✅ | `JWT_SECRET` 长度启动期强制；CI 新增产物扫描步骤 |
+| 授权输入不可被用户改写 | ✅ | D1 关闭 + `user_metadata` 结构性 grep 守卫 |
+
+### 明确未做的（是缺口，不是遗漏）
+
+1. **无限流**：登录与刷新端点可被暴力尝试 `code`/`state`。归 **S6**。
+2. **无绝对会话寿命**：只要持续刷新，会话可无限续。若要加，应在 `refresh_tokens.family_id` 上记 `first_seen_at` 并限制窗口——需要一次小迁移，等真实需求出现再做。
+3. **不做密钥轮换**：换 `JWT_SECRET` 会使全部在途 access token 立刻失效（refresh 仍可换新的，所以影响是 15 分钟内的强制重签）。S8 部署文档需写明这点。
+4. **不把令牌绑定 UA/IP**：`client_hint` 只作排查。绑定会造成浏览器小更新即踢人，且对真实攻击者几乎无阻力——刻意为之。
+5. **传输安全**：靠 S8 的 TLS 与 `COOKIE_SECURE=true`，代码内无法自证。
+
 
 ## 已知偏差 / 未尽事项（执行时填写）
 

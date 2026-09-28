@@ -94,6 +94,18 @@ jobs:
         # Production artifacts must build in CI, not only on a developer machine.
         run: pnpm -r build
 
+      # Server-side secrets must never reach the browser bundle. A value only
+      # becomes dangerous if some module reads it as a VITE_/NEXT_PUBLIC_ variable,
+      # since those are inlined at build time — so scan the built web output for the
+      # names, which is what a mistake would look like.
+      - name: Scan web artifacts for server secrets
+        run: |
+          if grep -rIlE "JWT_SECRET|OAUTH_CLIENT_SECRET|SUPABASE_SERVICE_ROLE" apps/web/dist; then
+            echo "A server secret name was inlined into the browser bundle."
+            exit 1
+          fi
+          echo "No server secret references in apps/web/dist."
+
       - name: Verify the API build output actually resolves
         # `tsc` emitting successfully is not evidence that the output *runs*.
         # With moduleResolution nodenext, an extension-less relative import

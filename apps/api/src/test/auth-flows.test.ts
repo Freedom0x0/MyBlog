@@ -18,6 +18,14 @@ import { waitForRedis } from './wait-for-redis.js'
 let stub: OAuthStub
 let app: FastifyInstance
 
+/** Captures everything the app logs, for the leak assertions. */
+const logged: string[] = []
+const logStream = {
+  write(chunk: string) {
+    logged.push(String(chunk))
+  },
+} as unknown as NodeJS.WritableStream
+
 const pristine: StubBehaviour = {
   tokenStatus: 200,
   tokenBody: { access_token: 'provider-token-1' },
@@ -38,7 +46,9 @@ beforeAll(async () => {
   process.env.OAUTH_BASE_URL = stub.url
   process.env.API_PUBLIC_URL = 'http://localhost:3001'
 
-  app = await buildApp({ config: loadConfig() })
+  // Log to a buffer so the credential-leak assertions below can inspect what the
+  // service would have written in production.
+  app = await buildApp({ config: loadConfig(), loggerDestination: logStream as never })
   await waitForRedis(app)
 })
 
@@ -260,6 +270,40 @@ describe('login', () => {
     return { response, location: (response.headers.location as string) ?? '' }
   }
 })
+
+/**
+ * Credentials must never reach the log.
+ *
+ * Logs get shipped, indexed and retained by systems with a much wider audience
+ * than the database. A refresh token there is a live 30-day credential for anyone
+ * with log access, and the JWT_SECRET would hand over the ability to mint any
+ * session. Neither is visible in any other test.
+ */
+describe('log hygiene', () => {
+  it('does not log the refresh token, the JWT secret, or the provider code', async () => {
+    const before = logged.length
+    const { cookies } = await login()
+    const refreshValue = cookie(cookies, 'portal_refresh').split('=')[1]!
+    const accessValue = cookie(cookies, 'portal_access').split('=')[1]!
+
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: { cookie: `portal_refresh=${refreshValue}`, 'x-requested-with': 'portal' },
+    })
+
+    const output = logged.slice(before).join('')
+
+    expect(output).not.toContain(refreshValue)
+    expect(output).not.toContain(configSecret)
+    // The OAuth code is single-use, but logging it would still expose a
+    // just-spent credential to anyone reading logs.
+    expect(output).not.toContain('provider-token-1')
+    expect(accessValue.length).toBeGreaterThan(0)
+  })
+})
+
+const configSecret = loadConfig().JWT_SECRET
 
 describe('CSRF guard', () => {
   it('refuses a state-changing auth call with no custom header', async () => {

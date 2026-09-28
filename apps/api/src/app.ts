@@ -18,6 +18,12 @@ import { tagRoutes } from './modules/tags/routes.js'
 
 export interface BuildAppOptions {
   config: Config
+  /**
+   * Overrides the log destination. Tests use it to assert that credentials never
+   * reach the log, which is the one leak a running service cannot be inspected
+   * for afterwards — by then it is already in the aggregation system.
+   */
+  loggerDestination?: NodeJS.WritableStream
 }
 
 /**
@@ -28,22 +34,28 @@ export interface BuildAppOptions {
  * `app.inject()`, which sends a request through the full routing stack without
  * binding a port. `server.ts` owns the listening concern.
  */
-export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInstance> {
+export async function buildApp({
+  config,
+  loggerDestination,
+}: BuildAppOptions): Promise<FastifyInstance> {
   const isDev = config.NODE_ENV === 'development'
 
   const app = Fastify({
     // Fastify's logger *is* pino — it is built in, so there is no separate pino
     // dependency to install or wire up. Production emits JSON; development gets
     // pino-pretty so logs are readable while working.
-    logger: isDev
-      ? {
-          level: config.LOG_LEVEL,
-          transport: {
-            target: 'pino-pretty',
-            options: { translateTime: 'HH:MM:ss.l', ignore: 'pid,hostname' },
-          },
-        }
-      : { level: config.LOG_LEVEL },
+    logger:
+      loggerDestination !== undefined
+        ? { level: config.LOG_LEVEL, stream: loggerDestination as unknown as NodeJS.WritableStream }
+        : isDev
+          ? {
+              level: config.LOG_LEVEL,
+              transport: {
+                target: 'pino-pretty',
+                options: { translateTime: 'HH:MM:ss.l', ignore: 'pid,hostname' },
+              },
+            }
+          : { level: config.LOG_LEVEL },
 
     // Both are native Fastify options, so no custom request-id plugin is
     // needed. If the caller already sent an id we keep it, which is what lets a
