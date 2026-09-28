@@ -1,32 +1,31 @@
 import { useAuthStore } from '../store/authStore';
 import { useTheme } from '../hooks/useTheme';
 import { Moon, Sun } from 'lucide-react';
-import { logout, startGithubLogin } from '../auth/githubAuth';
+import { loginUrl } from '../utils/authApi';
 
 export default function Header() {
   const { user, isAdmin } = useAuthStore();
   const { theme, toggleTheme } = useTheme();
 
-  const displayName =
-    user?.user_metadata?.user_name ||
-    user?.user_metadata?.preferred_username ||
-    user?.email;
+  const displayName = user?.login ?? '访客';
 
-  const handleLogin = async () => {
-    const { data, error } = await startGithubLogin(window.location.origin);
-    if (error) {
-      console.error('Login error:', error.message);
-      return;
-    }
-
-    if (data?.url) {
-      window.location.assign(data.url);
-    }
+  /**
+   * A whole-page navigation, not a fetch: the browser must leave for the provider
+   * and return to the API's callback, which a background request cannot do.
+   */
+  const handleLogin = () => {
+    window.location.assign(loginUrl(window.location.pathname));
   };
 
   const handleLogout = async () => {
-    await logout();
-    await useAuthStore.getState().signOut();
+    try {
+      await useAuthStore.getState().signOut();
+    } catch (error) {
+      // Surfaced rather than swallowed: a logout that silently failed leaves the
+      // visitor believing they are signed out on a shared machine.
+      console.error('logout failed', error);
+      window.alert('退出失败，请重试');
+    }
   };
 
   return (
@@ -52,8 +51,8 @@ export default function Header() {
             <div className="flex items-center space-x-4">
               <div className="flex items-center space-x-2">
                 <img
-                  src={user.user_metadata?.avatar_url || ''}
-                  alt={user.user_metadata?.full_name || 'User'}
+                  src={user.avatarUrl || ''}
+                  alt={displayName}
                   className="w-8 h-8 rounded-full border border-border"
                 />
                 <span className="text-sm font-medium hidden sm:inline-block">

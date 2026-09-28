@@ -46,7 +46,7 @@ const FALLBACK_PROJECTS: GithubProject[] = [
 export default function Home() {
   const [projects, setProjects] = useState<GithubProject[]>([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
-  const { session, isAdmin } = useAuthStore();
+  const { isAdmin } = useAuthStore();
 
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [loadingArticles, setLoadingArticles] = useState(true);
@@ -54,16 +54,16 @@ export default function Home() {
   useEffect(() => {
     const fetchProjects = async () => {
       try {
-        const headers: Record<string, string> = {};
-        
-        // Use provider token if available to get higher rate limit
-        if (session?.provider_token) {
-          headers['Authorization'] = `token ${session.provider_token}`;
-        }
-
-        const response = await fetch('https://api.github.com/users/guoshaoran/repos?sort=updated&per_page=6', {
-          headers
-        });
+        /**
+         * No auth header: the Supabase `provider_token` that used to be attached
+         * here was only present on the login round trip, so it was already gone on
+         * the next page load — the anonymous 60 requests/hour limit applied almost
+         * all the time and this only hid that.
+         *
+         * Properly fixing it means fetching repos server-side and caching them,
+         * which is defect D11 and belongs with the write path work, not here.
+         */
+        const response = await fetch('https://api.github.com/users/guoshaoran/repos?sort=updated&per_page=6');
 
         if (response.ok) {
           const data = await response.json();
@@ -84,7 +84,7 @@ export default function Home() {
     };
 
     fetchProjects();
-  }, [session]);
+  }, []);
 
   useEffect(() => {
     const load = async () => {

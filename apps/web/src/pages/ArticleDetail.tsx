@@ -3,13 +3,13 @@ import { useParams, Link } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { ArrowLeft, Clock, Calendar, Tag, Edit, Save, X, MessageSquare, Trash2 } from 'lucide-react';
+import { ArrowLeft, Clock, Calendar, Tag, Edit, Save, X, MessageSquare } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
-import { getSupabase } from '../lib/supabase';
 import MDEditor from '@uiw/react-md-editor';
 import rehypeSanitize from 'rehype-sanitize';
 import { getArticleBySlug, upsertArticle } from '../utils/articlesApi';
 import { listComments } from '../utils/commentsApi';
+import { loginUrl } from '../utils/authApi';
 import type { CommentNode } from 'shared';
 
 /**
@@ -41,7 +41,6 @@ const ArticleDetail: React.FC = () => {
 
   const { user, isAdmin } = useAuthStore();
   const [comments, setComments] = useState<CommentNode[]>([]);
-  const [newComment, setNewComment] = useState('');
   const [loadingComments, setLoadingComments] = useState(true);
 
   useEffect(() => {
@@ -126,48 +125,6 @@ const ArticleDetail: React.FC = () => {
     setArticle({ ...article, content: editedContent });
     localStorage.setItem(`article_${slug}`, editedContent);
     setIsEditing(false);
-  };
-
-  const submitComment = async () => {
-    if (!user || !newComment.trim() || !slug) return;
-    
-    const commentData = {
-      article_slug: slug,
-      user_id: user.id,
-      user_name: user.user_metadata?.user_name || user.email?.split('@')[0] || 'Anonymous',
-      avatar_url: user.user_metadata?.avatar_url || '',
-      content: newComment.trim(),
-    };
-
-    const { error } = await getSupabase().from('comments').insert([commentData]);
-
-    if (!error) {
-      setNewComment('');
-      /**
-       * Re-read through the API instead of prepending the inserted row.
-       *
-       * The Supabase row is snake_case and has no `author` object, so splicing it
-       * into CommentNode[] rendered fields that do not exist. Refetching also keeps
-       * one shape for the list and lets the server's ordering and author join apply
-       * to the new comment — the write path still lives in Supabase until S3.
-       */
-      try {
-        setComments(await listComments(slug));
-      } catch (refetchError) {
-        console.error('comments refresh failed', refetchError);
-      }
-    }
-  };
-
-  const deleteComment = async (id: string) => {
-    const { error } = await getSupabase()
-      .from('comments')
-      .delete()
-      .eq('id', id);
-      
-    if (!error) {
-      setComments(comments.filter(c => c.id !== id));
-    }
   };
 
   if (!article) {
@@ -329,37 +286,24 @@ const ArticleDetail: React.FC = () => {
           </h3>
 
           {user ? (
-            <div className="mb-10 bg-card p-4 rounded-xl border border-border">
-              <div className="flex items-start space-x-4">
-                <img 
-                  src={user.user_metadata?.avatar_url} 
-                  alt="Avatar" 
-                  className="w-10 h-10 rounded-full border border-border"
-                />
-                <div className="flex-1">
-                  <textarea
-                    value={newComment}
-                    onChange={(e) => setNewComment(e.target.value)}
-                    placeholder="分享你的想法..."
-                    className="w-full bg-background border border-border rounded-lg p-3 text-foreground focus:outline-none focus:ring-2 focus:ring-primary min-h-[100px] resize-y"
-                  />
-                  <div className="mt-3 flex justify-end">
-                    <button
-                      onClick={submitComment}
-                      disabled={!newComment.trim()}
-                      className="px-6 py-2 bg-primary text-primary-foreground rounded-md font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      发表评论
-                    </button>
-                  </div>
-                </div>
-              </div>
+            /**
+             * Posting is paused, and said so, rather than left to fail.
+             *
+             * Reads now come from the portal API, but writes still go to Supabase,
+             * whose RLS requires a Supabase-issued user id. Sign-in no longer runs
+             * through Supabase at all, so any insert here would be rejected —
+             * silently, with a spinner and no explanation. The gap is the one the
+             * plan expects (stage S3 moves the write path), so the UI states it
+             * instead of pretending the feature works.
+             */
+            <div className="mb-10 bg-card/50 p-4 rounded-xl border border-border text-center text-muted-foreground">
+              评论与发表的写入功能正在迁移到新的后端，暂时只读。已发表的评论可正常查看。
             </div>
           ) : (
             <div className="mb-10 bg-card/50 p-6 rounded-xl border border-border text-center">
               <p className="text-muted-foreground mb-4">登录后参与讨论</p>
               <button
-                onClick={() => getSupabase().auth.signInWithOAuth({ provider: 'github' })}
+                onClick={() => window.location.assign(loginUrl(window.location.pathname))}
                 className="px-6 py-2 bg-primary text-primary-foreground rounded-md font-medium hover:bg-primary/90 transition-colors"
               >
                 使用 GitHub 登录
@@ -388,15 +332,8 @@ const ArticleDetail: React.FC = () => {
                           {new Date(comment.createdAt).toLocaleString('zh-CN')}
                         </span>
                       </div>
-                      {(user?.id === comment.author.id || isAdmin) && (
-                        <button
-                          onClick={() => deleteComment(comment.id)}
-                          className="text-red-500/50 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
-                          title="删除评论"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
+                      {/* Deleting is a write too, so it is paused with the rest of
+                          them; see the notice above the list. */}
                     </div>
                     <p className="text-muted-foreground whitespace-pre-wrap leading-relaxed">
                       {comment.content}

@@ -21,13 +21,14 @@ export function hasSupabaseCredentials(): boolean {
  * Lazily constructed, and only for what still lives in Supabase: GitHub OAuth
  * until S2, and comment/article writes until S3.
  *
- * The previous version called `createClient` at module scope and threw when the
- * env vars were absent. Because `App.tsx` imports the auth module, that throw ran
- * while loading the bundle — so a fresh clone with no `.env` could not render the
- * homepage at all, even though reading articles needs nothing from Supabase.
+ * This module now backs exactly one thing: `upsertArticle`, the last write still
+ * going to Supabase. Sign-in moved to the portal API in S2, and the remaining
+ * writes move in S3, at which point this file goes away.
  *
- * Deferring construction means the failure happens where it belongs: when someone
- * actually clicks login.
+ * It is constructed lazily because the eager version threw at module scope when
+ * the env vars were absent, and since the auth module was imported by `App.tsx`
+ * that throw ran while loading the bundle: a fresh clone with no `.env` rendered
+ * nothing at all, even though reading articles needs nothing from Supabase.
  */
 export function getSupabase(): SupabaseClient {
   if (client !== null) return client
