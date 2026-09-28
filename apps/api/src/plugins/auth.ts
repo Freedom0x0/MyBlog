@@ -108,6 +108,20 @@ export async function requireAuth(request: FastifyRequest): Promise<void> {
   request.auth = auth
 }
 
+/**
+ * Requires a custom header that a cross-site form cannot set.
+ *
+ * Third layer, not a replacement: HttpOnly stops a script reading the token,
+ * SameSite stops most cross-site requests carrying the cookie at all, but a
+ * top-level cross-site *navigation* still sends a Lax cookie — so state-changing
+ * endpoints need something the browser will not forge on another site's behalf.
+ */
+export async function requireCsrfHeader(request: FastifyRequest): Promise<void> {
+  if (request.headers['x-requested-with'] !== 'portal') {
+    throw new ApiError(ERROR_CODES.csrfCheckFailed, 'Missing required header', 403)
+  }
+}
+
 function extractToken(request: FastifyRequest): string | undefined {
   const header = request.headers.authorization
   if (typeof header === 'string' && header.startsWith('Bearer ')) {

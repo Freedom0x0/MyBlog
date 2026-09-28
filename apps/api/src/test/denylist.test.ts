@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../app.js'
 import { loadConfig } from '../config/index.js'
 import { generateJti } from '../lib/tokens.js'
+import { waitForRedis } from './wait-for-redis.js'
 
 /**
  * Integration against real Redis. The property under test is a TTL behaving as a
@@ -16,20 +17,7 @@ beforeAll(async () => {
   }
   app = await buildApp({ config: loadConfig() })
 
-  /**
-   * The plugin deliberately does not await the first connect, so buildApp can
-   * return while the client is still dialling. Commands then fail immediately
-   * rather than queueing — that is `disableOfflineQueue` working as designed, and
-   * `/ready` reporting degraded during the gap is also correct.
-   *
-   * So the test waits for the state it depends on. Restoring a blocking connect to
-   * make this deterministic would trade a real outage-resilience property for
-   * test convenience.
-   */
-  const deadline = Date.now() + 5_000
-  while (!app.redis.isReady && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
+  await waitForRedis(app)
 })
 
 afterAll(async () => {

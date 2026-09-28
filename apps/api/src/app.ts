@@ -7,6 +7,7 @@ import type { Config } from './config/index.js'
 import { dbPlugin } from './plugins/db.js'
 import { redisPlugin } from './plugins/redis.js'
 import { denylistPlugin } from './plugins/denylist.js'
+import { configPlugin } from './plugins/config.js'
 import { authPlugin } from './plugins/auth.js'
 import { authRoutes } from './modules/auth/routes.js'
 import { errorHandlerPlugin } from './plugins/errorHandler.js'
@@ -53,6 +54,9 @@ export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInst
 
   // Zod is the single definition source for both validation and types, so a
   // route's DTO is not hand-mirrored into a second type declaration.
+  // First: everything downstream reads app.config / app.oauthProvider.
+  await app.register(configPlugin, { config })
+
   app.setValidatorCompiler(validatorCompiler)
   app.setSerializerCompiler(serializerCompiler)
 

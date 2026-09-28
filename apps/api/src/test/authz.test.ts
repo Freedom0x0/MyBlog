@@ -7,6 +7,7 @@ import { loadConfig } from '../config/index.js'
 import { requireAdmin } from '../modules/auth/guards.js'
 import { requireAuth } from '../plugins/auth.js'
 import { generateJti } from '../lib/tokens.js'
+import { waitForRedis } from './wait-for-redis.js'
 
 /**
  * Authorisation tests — the "prove a bug is actually closed" file.
@@ -32,6 +33,8 @@ beforeAll(async () => {
   }
 
   app = await buildApp({ config })
+  // Logout tests revoke through the denylist, which needs a live client.
+  await waitForRedis(app)
 
   // Test-only surfaces so the guards have something to guard.
   app.get('/test/whoami', { onRequest: [requireAuth] }, async (request) => ({
