@@ -70,3 +70,28 @@ writing the fix — not after it is committed, pushed and under review.
 - [Backend conventions](../backend/conventions.md) §8 — migrations must be executed against a scratch database, never reviewed by eye
 - [Code Reuse guide](./code-reuse-thinking-guide.md) — search before modifying
 - [Cross-Layer guide](./cross-layer-thinking-guide.md) — bugs live at boundaries
+
+---
+
+## Three more ways a check can be quietly worthless
+
+**A 200 from a dev server is not a rendered page.** For an SPA the server returns
+the shell HTML no matter how badly client-side mounting fails — `curl` sees the same
+bytes whether the app crashed or painted. Verified this the hard way: the lazy
+Supabase client was recorded as "app starts without credentials", checked by
+curling `localhost:5175`, while `onAuthChange` still threw synchronously during
+mount and blanked the tree.
+
+**A test that passes with the feature removed.** A scale check for a tag filter
+generated 5000 rows that *all* carried the tag being filtered. Both the broken and
+the fixed query matched every row, produced the same plan, and "passed". Selectivity
+is the thing being tested; a fixture that guarantees a match tests nothing.
+
+**An assertion added twice is not an assertion added once.** A batch edit script that
+validates before writing aborted on one unrelated pair and **silently skipped every
+edit after it**. The retry applied the one that failed and reported success, so the
+dropped edits — including the consumer side of a contract change — looked done.
+Prefer per-edit reporting over all-or-nothing when a batch has independent items.
+
+---
+

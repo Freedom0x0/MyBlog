@@ -275,3 +275,75 @@ Supabase objects such as the `auth` schema (expected locally, not a finding).
 - **Why it matters here**: the anon key ships in the client bundle by design, so RLS is the *only* boundary between a browser and the table — and this places the decision on attacker-controlled input.
 - **Fix**: authorize on `app_metadata` (writable only via `service_role`), or in the self-built API on a real `users.is_admin` column. Owned by S2; see `technical_architecture.md` defect D1.
 - **Prevention**: when writing any authorization check, name the party that can write the value you are reading. If the answer is "the user", it is not an authorization input.
+
+---
+
+## 9. Indexes: prove they are usable, at scale
+
+Two rules that read as trivia and both cost a full scan when broken.
+
+### `ORDER BY` must match the index expression exactly, including `NULLS`
+
+```sql
+-- index
+create index articles_list_keyset on articles (status, published_at desc nulls last, id desc);
+```
+
+```sql
+-- wrong: Postgres defaults to NULLS FIRST for DESC, so this does not match the
+-- index, and the planner gives up on index ordering and sorts instead
+order by published_at desc, id desc
+
+-- right
+order by published_at desc nulls last, id desc
+```
+
+Measured on 5000 rows: mismatched → **2505 rows scanned + Sort**; aligned →
+**Limit over Index Scan, 10 rows, 3 buffers, no Sort node**.
+
+Correctness is unaffected — which is why this hides. The query returns the right
+rows either way; only the cost changes.
+
+### GIN serves `@>`, and nothing else
+
+```sql
+-- cannot use a GIN index; always a post-scan filter
+where 'needle' = any (tags)
+
+-- can
+where tags @> array['needle']::text[]
+```
+
+Identical meaning to a reader, different execution plan. Measured with a selective
+tag (3 of 5000): containment `Bitmap Index Scan on articles_tags_gin`, 10 buffers,
+0.275 ms; the `any` form `Seq Scan`, `Rows Removed by Filter: 4998`, 109 buffers,
+1.767 ms.
+
+**Write the comment and the code together.** The schema comment promised `@>` while
+the repository used `= any`, and the index was dead for weeks of local use because
+nothing measured it.
+
+### A small table cannot demonstrate any of this
+
+Six seeded rows produce a plausible plan for a broken query. **Load a few thousand
+rows into a scratch database and re-check.** Better: make the filter actually
+selective — an early attempt matched every row, so both forms gave the same plan and
+the test passed with the defect fully in place.
+
+---
+
+## 10. CI environment scope
+
+Job-level `env:` is visible to **every** step. When stage C added `DATABASE_URL` at
+job level for the test database, a later step that asserted
+"`node dist/server.js` exits non-zero on missing config" stopped being able to fail:
+the server started, listened, and hung until the job timed out.
+
+Scrub it explicitly in the steps that need its absence:
+
+```bash
+env -u DATABASE_URL -u REDIS_URL node apps/api/dist/server.js
+```
+
+**Rule:** a step that asserts a negative must have the variables under test removed,
+not merely "not set by that step".
