@@ -4,6 +4,11 @@ import { ConfigError, loadConfig } from './index.js'
 const validEnv = {
   DATABASE_URL: 'postgresql://user:pass@localhost:5432/myblog',
   REDIS_URL: 'redis://localhost:6379',
+  // S2 made these required; a test env that omits them fails for the wrong
+  // reason, so the fixture states them explicitly rather than relying on defaults.
+  JWT_SECRET: 'x'.repeat(43),
+  OAUTH_CLIENT_ID: 'test-client-id',
+  OAUTH_CLIENT_SECRET: 'test-client-secret',
 }
 
 describe('loadConfig', () => {

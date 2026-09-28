@@ -62,7 +62,9 @@ export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInst
    * origin AND credentials, never `*` with both.
    */
   await app.register(cors, {
-    origin: config.CORS_ORIGIN,
+    origin: config.PORTAL_WEB_ORIGIN,
+    // Flipped to true in stage F together with cookie sessions; until then a
+    // wildcard-free single origin with no credentials is the strictest setting.
     credentials: false,
   })
 

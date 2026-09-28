@@ -164,6 +164,14 @@ requireAdmin  : requireAuth 之后 → select is_admin from users where id = $1
 
 **引导**：seed 在 dev 把 `github_login='guoshaoran'` 的行置 `is_admin=true`；生产由 `pnpm --filter api admin grant <login>`（要求用户已存在于表中，且必须在服务端执行）。
 
+### ⚠ 有效期不是库保证的（阶段 B 实测）
+
+`@fastify/jwt` **接受没有 `exp` 声明的令牌，即使验证时传了 `maxAge` 也不拒绝**。
+
+也就是说 15 分钟这个数**不存在于验签逻辑里**——它之所以生效，纯粹因为签发时传了 `expiresIn`。漏传一次就发出一张永不过期的卡，而 denylist 只能撤销"已知的"卡，撤销不了攻击者手里那张不知道何时到期的。
+
+**因此约束：全项目只允许一处签发 access token**（阶段 D 的 `signAccessToken`），它无条件带上 `config.ACCESS_TOKEN_TTL_SECONDS`。`src/lib/tokens.test.ts` 里有一条**表征测试**把这个库行为钉死——若哪天库改成默认拒绝，测试会失败并提醒我们重新评估，而不是让我们以为防线一直在。
+
 **不提供 HTTP 管理接口**（已裁剪）。这带来一个诚实的后果：`requireAdmin` 在本阶段没有产品级靶子，因此 403 只能以中间件单测覆盖，端到端授权测试要等 S3。
 
 ---
@@ -218,3 +226,4 @@ provider 基址从配置读（`OAUTH_BASE_URL`），因此**生产指向 github.
 | 两套身份体系并存期混乱 | 明确记录：S3 之前写路径仍走 Supabase，不宣称"已脱离" |
 | 开放重定向 | `return_to` 白名单化 + 专门测试用例 |
 | refresh 明文进日志 | `client_hint` 与日志字段只记哈希前缀；加断言 |
+| 漏传 `expiresIn` 导致永不过期的令牌 | 签发集中在唯一一处并无条件附加 TTL；库行为有表征测试钉住（见 §5） |

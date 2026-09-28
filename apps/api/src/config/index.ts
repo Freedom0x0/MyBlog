@@ -5,6 +5,9 @@ import { z } from 'zod'
  *
  * Validated once at boot, not read lazily at request time. See `loadConfig`
  * for why that distinction matters.
+ *
+ * Nothing here may carry a `VITE_`/`NEXT_PUBLIC_` prefix by another name: those
+ * are inlined into the browser bundle, and several of these values are secrets.
  */
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -20,12 +23,47 @@ const EnvSchema = z.object({
     .default('info'),
 
   /**
-   * The origin the browser app is served from.
+   * Signing key for access tokens.
    *
-   * Re-added in stage G with its first real consumer, not before: a config key
-   * nothing reads is worse than no config key, because it looks authoritative.
+   * 32 characters of base64url is ~192 bits of entropy, comfortably past HS256's
+   * 256-bit key expectation for practical purposes. The minimum is enforced at
+   * boot rather than trusted to convention because a hand-typed "long enough"
+   * secret is the normal failure mode, and the cost of starting anyway is that
+   * every token ever issued becomes brute-forceable.
    */
-  CORS_ORIGIN: z.string().default('http://localhost:5175'),
+  JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters; generate one with crypto.randomBytes(32)'),
+
+  ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().min(60).max(3600).default(900),
+  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).max(180).default(30),
+
+  /**
+   * OAuth provider base URL.
+   *
+   * Configurable so tests can point at a local stub and exercise the same code
+   * path as production — including the failure branches a real provider will not
+   * produce on demand (a spent code replayed, an `error=` callback, a 401
+   * exchange).
+   */
+  OAUTH_BASE_URL: z.string().url().default('https://github.com'),
+  OAUTH_CLIENT_ID: z.string().min(1),
+  OAUTH_CLIENT_SECRET: z.string().min(1),
+  OAUTH_REDIRECT_PATH: z.string().startsWith('/').default('/api/v1/auth/github/callback'),
+
+  /**
+   * The one browser origin allowed to send session cookies.
+   *
+   * Deliberately a single explicit value, never '*': with credentials enabled the
+   * browser rejects a wildcard response, and a wildcard that did work would let
+   * any site attach a user's cookie to its requests.
+   */
+  PORTAL_WEB_ORIGIN: z.string().url().default('http://localhost:5175'),
+
+  /**
+   * NOT `z.coerce.boolean()`: coercion uses Boolean(value), and Boolean('false')
+   * is true, so an env var set to the string "false" would silently enable secure
+   * cookies. Enumerating the accepted text makes a typo fail at boot instead.
+   */
+  COOKIE_SECURE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
 })
 
 export type Config = z.infer<typeof EnvSchema>
