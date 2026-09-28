@@ -47,6 +47,8 @@ export const authPlugin = fp(
 
     await app.register(jwt, {
       secret: config.JWT_SECRET,
+            // Kept in sync with ACCESS_COOKIE in modules/auth/session.ts by the
+      // auth flow tests: a mismatch means no token is ever found in the cookie.
       cookie: { cookieName: 'portal_access', signed: false },
     })
 

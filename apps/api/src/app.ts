@@ -71,9 +71,16 @@ export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInst
    */
   await app.register(cors, {
     origin: config.PORTAL_WEB_ORIGIN,
-    // Flipped to true in stage F together with cookie sessions; until then a
-    // wildcard-free single origin with no credentials is the strictest setting.
-    credentials: false,
+    /**
+     * True from S2 onward because the session now travels in a cookie, and a
+     * cross-origin fetch will not attach one unless the response says it may.
+     *
+     * Paired with a single explicit origin on purpose: `credentials: true` with a
+     * wildcard is rejected by browsers, and if it were accepted it would let any
+     * site ride along a visitor's session. Both halves are load-bearing — the
+     * strictest-looking setting here is the combination, not either knob alone.
+     */
+    credentials: true,
   })
 
   // Infrastructure first, so anything registered later can rely on app.db and
