@@ -177,12 +177,34 @@ api 测试 **53 passed / 7 files**；`pnpm -r lint/check/test/build` 全绿；CI
 
 ---
 
-## D · 评论读 API
+## D · 评论读 API — ✅ 完成
 
-- [ ] `modules/comments/`：`GET /api/v1/articles/:slug/comments`
-- [ ] join `users` 取作者信息（**不再快照 user_name/avatar**）
-- [ ] 返回平铺 + `parentId`，不服务端建树
-- [ ] 文章不存在或非 published → 404
+- [x] `modules/comments/`：`GET /api/v1/articles/:slug/comments`
+- [x] join `users` 取作者（**不再快照 user_name/avatar**）
+- [x] 返回平铺 + `parentId`，不服务端建树
+- [x] 文章不存在或非 published → 404
+
+### 本阶段最值得记的一条：复用而非复制安全规则
+
+"这条文章是否公开"已经写在 `ArticleService` 里。评论端点**必须调用同一条规则**，不能把三个条件抄一遍——抄的那份早晚和原件不一致，而后果是某个端点开始漏草稿。
+
+因此把规则从 `getPublished` 里提出来成 `findPublished(slug)`，`getPublished` 与 `CommentService` 都走它。测试里专门有一条断言：草稿的评论端点返回 404 **且响应体不含草稿评论内容**。
+
+### 另一个教训：vitest 全绿而 tsc 报错
+
+第一次跑时 **58 个测试全过，但 `pnpm --filter api check` 失败**：`findPublished` 内部已排除 null，返回类型却仍是 `string | null`。
+
+**vitest 用 esbuild 转译，不做类型检查**——所以"测试通过"从来不等于类型正确。这正是 `check` 必须作为 CI 独立闸口的原因，两处都不能省。
+
+修法上还有一个 TS 细节：`if (found.publishedAt === null) throw` 只收窄**属性访问**，不收窄**整个对象的可赋值性**，所以 `return found` 仍然报 `ArticleRecord` 不能赋给 `PublishedArticle`。要显式 `return { ...found, publishedAt: found.publishedAt }`。
+
+### 一个 tie-breaker 真的派上用场的地方
+
+两条 seed 评论在同一事务里插入，`created_at` **完全相同**——`order by created_at asc`  alone 是不确定的。加上 `id asc` 后顺序才稳定，测试才能断言"根在回复之前"。**分页与排序必须有全序**，这条在这里变成了具体可见的。
+
+### 状态
+
+api 测试 **58 passed / 8 files**；`lint / check / build` 全绿。
 
 ---
 

@@ -7,6 +7,7 @@ import { redisPlugin } from './plugins/redis.js'
 import { errorHandlerPlugin } from './plugins/errorHandler.js'
 import { healthRoutes } from './routes/health.js'
 import { articleRoutes } from './modules/articles/routes.js'
+import { commentRoutes } from './modules/comments/routes.js'
 
 export interface BuildAppOptions {
   config: Config
@@ -58,6 +59,7 @@ export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInst
   await app.register(errorHandlerPlugin)
   await app.register(healthRoutes)
   await app.register(articleRoutes)
+  await app.register(commentRoutes)
 
   return app
 }
