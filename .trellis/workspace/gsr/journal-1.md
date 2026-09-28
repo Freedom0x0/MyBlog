@@ -111,3 +111,36 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 4: S2 自建鉴权：OAuth + JWT 生命周期，以及一次推翻四条自我结论的独立复核
+<!-- trellis-session: v=2 fp=3f7c3dbd91b59a69 -->
+
+**Date**: 2026-09-28
+**Task**: S2 自建鉴权：OAuth + JWT 生命周期，以及一次推翻四条自我结论的独立复核
+**Branch**: `feat/s0-foundation`
+
+### Summary
+
+用自建鉴权替换 Supabase Auth：手写 GitHub OAuth 授权码流（state 一次性 GETDEL、prompt=consent 强制新鲜 code、错误早退、provider 响应体绝不回显）、access JWT 15 分钟只放 sub+jti、refresh 30 天只存 SHA-256 哈希并按 family 轮换与复用检测（旧值再现即整族撤销，SELECT FOR UPDATE 单事务防并发双刷）、登出用 Redis denylist 让 access 立即失效、requireAuth/requireAdmin 权限只查数据库 users.is_admin（根治 D1）、管理员授予仅 CLI 无 HTTP 接口（按用户裁剪）。前端改由 /auth/me 取身份、删除 githubAuth.ts 与 ADMIN_GITHUB_USERNAME 硬编码，cookie 走 HttpOnly + SameSite + 窄 Path，CORS 开 credentials 并锁单源，写接口加自定义头防 CSRF。CI 加 Postgres+Redis service、迁移与 seed、产物密钥扫描。SPIKE 用『故意写错返回值看 tsc 是否报错』确证类型真实推断，并顺带发现 S0 遗留的 Redis 关闭泄漏 socket 致进程永不退出（会卡死集成测试）。复核结论：它重新构建、并发实测、并自做变异检验，推翻了我记录为已验证的四条——CI 其实是红的（S2 新增必填配置项没进 ci.yml，本地靠 .env 才绿）；D1 的结构守卫是空过的（git grep pathspec 相对 cwd 解析成 apps/api/apps/api/src，植入违例仍通过）；以 login 为身份键可被抢注继承管理员行（scratch 库实测，改用不可变 github_id 并让 admin grant 遇歧义报错）；漏了登录 CSRF（state 本身是 bearer 值，补 nonce cookie 绑定浏览器）。另有两处文档与代码矛盾按改文档方式解决（TOKEN_REVOKED 等码不该实现）。全部修复并对新控制做变异检验。沉淀规范：必填配置项是 CI 契约；报告型闸门不是闸门（两次带红提交）；无匹配搜索与没搜任何东西不可区分，需对照断言；脚本写文件必须显式 utf-8（GBK 崩溃但同块 commit 已成功并谎称完成）。131 测试全绿。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d6aeee5` | docs(spec): a reporting gate is not a gate; correct the S2 record |
+| `23eec0d` | fix(auth): key identity on the immutable github id; bind login to the browser |
+| `2b9d608` | docs(task): record S2 acceptance results and its limits |
+| `fa5b4ad` | test(api): prove credentials never reach the log; CI scans artifacts |
+| `57be4d2` | feat(web): sign in through the portal API instead of Supabase Auth |
+| `51d67fc` | feat(api): enable credentialed CORS for the cookie session |
+| `f6ce5af` | feat(api): OAuth login, session cookies and a stub provider |
+| `04c2d9a` | feat(api): add a configurable OAuth code-flow client |
+| `de9f03e` | feat(api): auth guards, /auth/me and an admin CLI |
+| `9300f48` | feat(api): refresh token rotation with reuse detection and an access denylist |
+| `13ba387` | feat(api): auth token primitives and config, with the TTL assumption corrected |
+| `8e2fc27` | feat(api): add refresh_tokens migration |
+
+### Status
+
+[OK] **Completed**
