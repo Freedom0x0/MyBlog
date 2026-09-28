@@ -59,3 +59,83 @@ export interface ReadinessPayload {
 export interface LivenessPayload {
   status: 'ok'
 }
+
+/**
+ * ── API DTOs ─────────────────────────────────────────────────────────────────
+ *
+ * Plain interfaces, not Zod schemas, for one specific reason: `apps/web` should
+ * not need `zod` installed merely to name a response type, yet the API does need
+ * runtime validation. So the contract lives here and the validator lives in the
+ * API, and `AssertEquivalent` below is what stops the two from drifting apart —
+ * a route whose schema diverges fails `tsc`, not a runtime assertion.
+ *
+ * Wire format is camelCase throughout; the database is snake_case and that
+ * translation happens only in the repository.
+ */
+
+export interface ArticleSummary {
+  slug: string
+  title: string
+  excerpt: string
+  category: string
+  tags: string[]
+  coverImage: string | null
+  readTime: number
+  publishedAt: string
+}
+
+export interface ArticleDetail extends ArticleSummary {
+  content: string
+}
+
+/**
+ * Cursor pagination envelope. `next` is null on the last page rather than
+ * absent, so a client can stop without comparing against an empty array.
+ */
+export interface ArticlePage {
+  data: ArticleSummary[]
+  next: { cursor: string } | null
+  limit: number
+}
+
+export interface CommentAuthor {
+  login: string
+  displayName: string | null
+  avatarUrl: string | null
+}
+
+/**
+ * Flat with a `parentId` pointer; the client assembles the tree. Nesting depth
+ * is small, and this keeps the read path to a single indexed query instead of a
+ * recursive CTE per page view.
+ */
+export interface CommentNode {
+  id: string
+  articleId: string
+  parentId: string | null
+  content: string
+  author: CommentAuthor
+  createdAt: string
+}
+
+export interface CommentList {
+  data: CommentNode[]
+}
+
+export interface TagCount {
+  tag: string
+  count: number
+}
+
+export interface TagList {
+  data: TagCount[]
+}
+
+/**
+ * Compile-time equality check: `A extends B` AND `B extends A`.
+ *
+ * Structural typing lets two shapes differ in optionality and still pass a
+ * one-directional check, so both directions are asserted.
+ */
+export type AssertEquivalent<A, B> =
+  [A] extends [B] ? ([B] extends [A] ? true : false) : false

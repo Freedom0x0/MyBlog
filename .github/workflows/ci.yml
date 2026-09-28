@@ -15,6 +15,32 @@ jobs:
   verify:
     runs-on: ubuntu-latest
 
+    # Integration tests drive a real Fastify against a real Postgres, so CI needs
+    # the same database development has.
+    #
+    # No Redis service: the read paths never touch it, and the client no longer
+    # blocks startup when it is unreachable — so a dummy REDIS_URL satisfies
+    # config validation and nothing more. That is a direct consequence of the
+    # shutdown fix; before it, every integration test would have needed Redis up.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      REDIS_URL: redis://localhost:6379
+
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +64,13 @@ jobs:
 
       - name: Type check
         run: pnpm -r check
+
+      # Schema first, then fixtures: the integration tests assert against the
+      # seeded content (page walks, byte-for-byte bodies, draft invisibility).
+      - name: Migrate and seed
+        run: |
+          pnpm --filter api migrate:up
+          pnpm --filter api seed
 
       - name: Test
         # --if-present because not every package has tests yet (apps/web has

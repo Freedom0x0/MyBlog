@@ -6,6 +6,7 @@ import { dbPlugin } from './plugins/db.js'
 import { redisPlugin } from './plugins/redis.js'
 import { errorHandlerPlugin } from './plugins/errorHandler.js'
 import { healthRoutes } from './routes/health.js'
+import { articleRoutes } from './modules/articles/routes.js'
 
 export interface BuildAppOptions {
   config: Config
@@ -56,6 +57,7 @@ export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInst
   // Registered after the plugins so it also covers errors they throw.
   await app.register(errorHandlerPlugin)
   await app.register(healthRoutes)
+  await app.register(articleRoutes)
 
   return app
 }

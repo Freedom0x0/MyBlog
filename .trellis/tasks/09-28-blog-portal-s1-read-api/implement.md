@@ -131,27 +131,49 @@ OK  oversized         bytes=117669  sha=40eb9497→40eb9497
 
 ---
 
-## C · 文章读 API（list + detail）
+## C · 文章读 API（list + detail）— ✅ 完成
 
-- [ ] `lib/pagination.ts`：游标编解码 + 单元测试（往返、非法输入）
-- [ ] `modules/articles/schema.ts`：Zod DTO（`ArticleSummary` / `ArticleDetail` / 查询参数）
-- [ ] `repository.ts`：只写 SQL；行 → camelCase 领域对象；**列表不 select 正文**
-- [ ] `service.ts`：过滤规则、draft 不可见；**不出现 `request`/`reply`，不出现 SQL**
-- [ ] `routes.ts`：`GET /api/v1/articles`、`GET /api/v1/articles/:slug`
-- [ ] 注册进 `app.ts`
-- [ ] keyset 查询用行值比较 `(published_at, id) < ($1,$2)`
+- [x] `lib/pagination.ts`：游标编解码 + 单元测试（往返、URL 安全性、7 类非法输入）
+- [x] `modules/articles/schema.ts`：Zod DTO + **三个编译期漂移守卫**（`*_MATCHES_CONTRACT`）
+- [x] `repository.ts`：只写 SQL；行 → camelCase 领域对象；**列表不 select 正文**；全参数化
+- [x] `service.ts`：分页与可见性规则；**不含 `request`/`reply`，不含 SQL**
+- [x] `routes.ts`：两个 GET；不手写错误响应体
+- [x] 注册进 `app.ts`
+- [x] keyset 用行值比较 `(published_at, id) < ($n::timestamptz, $m::uuid)`
 
-**验证**：
+### 两个被测试抓出来的真 bug（都不是读代码能看出来的）
 
-```bash
-curl -s 'localhost:3001/api/v1/articles?limit=2' | head -c 400
-# 用返回的 next.cursor 取第二页，确认无重叠、无遗漏
-curl -s 'localhost:3001/api/v1/articles?cursor=!!!bad'      # 400 INVALID_CURSOR
-curl -s 'localhost:3001/api/v1/articles/does-not-exist'      # 404 ARTICLE_NOT_FOUND
-psql "$DATABASE_URL" -c "explain (analyze, buffers) select ... " # 确认走 articles_list_keyset
+**① 参数占位符重号**：`param()` 辅助函数按 `values.length` 生成编号，而我在**同一个模板字符串里调用了它两次、且都在 `values.push` 之前** → 生成 `($4::timestamptz, $4::uuid)`。Postgres 报：
+
+```
+cannot cast type timestamp with time zone to uuid   (code 42846)
 ```
 
-`EXPLAIN` 输出**贴进本文件末尾**，作为 S1-R3 的证据。
+**② 分层假设越界**：`repository.findBySlug` 直接调 `toSummary`，隐含假定 `published_at` 非空。草稿该列合法地为 NULL → `.toISOString()` 崩 → **草稿详情返回 500 而不是 404**。
+
+这不是笔误，是**层放错了**：`published_at` 是否可空取决于"这行能不能公开"，那是 service 的规则。修法是 repository 返回 `publishedAt: string | null` 的 `ArticleRecord`，由 service 在决定可见性之后再构造 `ArticleDetail`。
+
+**我原本的验收断言还掩盖了它**：page-walk 测试直接取 `body.data` 而不先查状态码，失败信息是 `body.data is not iterable`，真正的数据库错误被埋了。已改为**每页先断言 200 再读 body**。
+
+### 一处诚实的能力边界
+
+`EXPLAIN (ANALYZE, BUFFERS)` 显示两条查询都用 `Index Scan using articles_list_keyset`，且 **keyset 谓词被下推进 `Index Cond`**：
+
+```
+Index Cond: ((status='published') AND (ROW(published_at, id) < ROW(...::timestamptz, ...::uuid)))
+```
+
+但表只有 6 行，planner 仍选了 `Sort` + top-N heapsort 并扫了全部匹配行。**所以这组证据只证明"索引可用、谓词由索引服务"，尚未证明"提前终止扫描"** —— 那需要规模化数据，留给 S6 与 k6 一起做。不在此夸大。
+
+### 补记：一条我自己写的测试当时过不了
+
+`decodeCursor` 原先不校验 `i` 的形状，而我写的用例断言非 uuid 应被拒。**注释里写的风险是真的**（非法值会在 Postgres 里炸成 500）。所以补了 uuid 正则校验，而不是删掉那条测试。
+
+### 状态
+
+api 测试 **53 passed / 7 files**；`pnpm -r lint/check/test/build` 全绿；CI 已加 Postgres service container 并本地按 CI 确切顺序从**空库**跑通（install→lint→check→migrate→seed→test→build→产物解析）。
+
+> **CI 里没有 Redis service 也能跑集成测试**，这是阶段 0 那个"Redis 不可达不再阻塞启动"修复的直接回报——否则每个集成测试都得先把 Redis 起起来。
 
 ---
 
