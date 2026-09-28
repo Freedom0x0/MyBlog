@@ -270,7 +270,11 @@ describe('D1 regression: nothing a user can write grants anything', () => {
       // swallowed as a pass, or this assertion proves nothing.
       const { status: code, stderr } = error as { status?: number; stderr?: string }
       if (code !== 1) {
-        throw new Error(`user_metadata grep could not run (status ${code}): ${stderr ?? ''}`)
+        // cause attached: a wrapped error without it loses the original stack in
+        // the log, which is the only thing that explains a broken harness.
+        throw new Error(`user_metadata grep could not run (status ${code}): ${stderr ?? ''}`, {
+          cause: error,
+        })
       }
       status = code
     }

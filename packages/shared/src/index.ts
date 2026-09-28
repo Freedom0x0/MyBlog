@@ -27,9 +27,14 @@ export const ERROR_CODES = {
   rateLimited: 'RATE_LIMITED',
   internalError: 'INTERNAL_ERROR',
 
-  /** Domain codes, stable additions for the article and comment modules. */
+  /** Domain codes, stable additions for the article, comment and auth modules. */
   articleNotFound: 'ARTICLE_NOT_FOUND',
   invalidCursor: 'INVALID_CURSOR',
+  invalidState: 'INVALID_STATE',
+  oauthDenied: 'OAUTH_DENIED',
+  oauthExchangeFailed: 'OAUTH_EXCHANGE_FAILED',
+  oauthProfileFailed: 'OAUTH_PROFILE_FAILED',
+  csrfCheckFailed: 'CSRF_CHECK_FAILED',
 } as const
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES]

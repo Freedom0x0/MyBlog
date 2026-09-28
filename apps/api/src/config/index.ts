@@ -50,6 +50,16 @@ const EnvSchema = z.object({
   OAUTH_REDIRECT_PATH: z.string().startsWith('/').default('/api/v1/auth/github/callback'),
 
   /**
+   * This service's own externally reachable origin.
+   *
+   * Needed to build redirect_uri, which GitHub matches character-for-character
+   * against the registered callback. Deliberately configured rather than derived
+   * from the Host header: a spoofed header would send the browser to a callback
+   * URL on an attacker's host, and the code would land there.
+   */
+  API_PUBLIC_URL: z.string().url().default('http://localhost:3001'),
+
+  /**
    * The one browser origin allowed to send session cookies.
    *
    * Deliberately a single explicit value, never '*': with credentials enabled the
