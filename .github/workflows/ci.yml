@@ -23,6 +23,19 @@ jobs:
     # config validation and nothing more. That is a direct consequence of the
     # shutdown fix; before it, every integration test would have needed Redis up.
     services:
+      # Needed from S2 on: the access-token denylist lives in Redis, and its
+      # tests assert a real TTL. Without this the comment above ("no Redis
+      # service required") would be stale rather than merely simplified.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
       postgres:
         image: postgres:17-alpine
         env:

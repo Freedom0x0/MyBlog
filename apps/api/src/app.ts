@@ -5,6 +5,7 @@ import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod
 import type { Config } from './config/index.js'
 import { dbPlugin } from './plugins/db.js'
 import { redisPlugin } from './plugins/redis.js'
+import { denylistPlugin } from './plugins/denylist.js'
 import { errorHandlerPlugin } from './plugins/errorHandler.js'
 import { healthRoutes } from './routes/health.js'
 import { articleRoutes } from './modules/articles/routes.js'
@@ -72,6 +73,8 @@ export async function buildApp({ config }: BuildAppOptions): Promise<FastifyInst
   // app.redis existing.
   await app.register(dbPlugin, { config })
   await app.register(redisPlugin, { config })
+  // After redisPlugin: the denylist is stored in Redis.
+  await app.register(denylistPlugin)
 
   // Registered after the plugins so it also covers errors they throw.
   await app.register(errorHandlerPlugin)

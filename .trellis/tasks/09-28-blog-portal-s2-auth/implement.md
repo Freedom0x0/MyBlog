@@ -58,7 +58,25 @@ pnpm --filter api test -- tokens
 
 ---
 
-## C · 撤销与轮换（安全核心）
+## C · 撤销与轮换（安全核心）— ✅ 完成（86 测试）
+
+实测中修正的四处，全部由运行暴露而非阅读暴露：
+
+| 现象 | 真因 | 性质 |
+|---|---|---|
+| 5 个 denylist 测试 `app.denylist` undefined | 插件写了但**没在 app.ts 注册** | 实现漏接 |
+| 5 个测试 `The client is offline` | 不 await connect ⇒ `buildApp()` 返回时可能仍在拨号；**实现正确，测试抢跑** | 测试缺陷 |
+| `Query<TokenRow[]>` 使 rows 成二维 | `Query<T>` 已是 `T[]`。**81 个测试全绿而 tsc 报错** | 类型谎言 |
+| `sendCommand({command:'ttl'})` 形状错 | RESP 协议错误**打断 socket**；`client.ttl()` 本已存在 | 凭猜写 API |
+
+**设计变更（因测试而加）**：`RefreshTokenError` 作为共同基类。未知/过期/已用三类失败在**边界上必须同为 401 同码**——分别给不同 code 等于告诉攻击者哪个猜测命中了存储状态；子类仅用于日志与指标。
+
+`rotate` 用 `SELECT ... FOR UPDATE`：无行锁时两个并发刷新都读到"未使用"，各自插入子节点并都成功，留下两支活 token，**复用检测对这一对就永久失效**。
+
+我的两条测试自己也写错了：#2 注释说"B 家族存活"却断言了同族的 `rotated`；#1 断言 `InvalidTokenError` 而整族撤销后再出示任何成员本质仍是复用。后者正是引入基类的原因——**断言应钉住边界结果，而不是钉住实现细节**。
+
+`disableOfflineQueue` 期间隔的 `/ready` 报 degraded 是**正确语义**，因此选择让测试等待连接就绪，而不把启动改回阻塞换测试方便。
+
 
 - [ ] `plugins/denylist.ts`：`revoke(jti, ttlSeconds)` / `isRevoked(jti)`，走 Redis
 - [ ] `modules/auth/token-store.ts`：`issue(userId, familyId?)`、`rotate(oldRaw)`、`revokeFamily(id)`
