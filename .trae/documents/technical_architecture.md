@@ -284,7 +284,7 @@ $$;
 
 | # | 问题 | 证据 | 优先级 |
 |---|---|---|---|
-| 1 | `is_admin()` 提权漏洞 | `03_update_is_admin.sql` | 🔴 P0 |
+| 1 | `is_admin()` 提权漏洞。**2026-09-28 状态更新**：已用桩 `auth.jwt()` 实测确认可利用（伪造 `user_metadata` 的 INSERT 穿过 RLS）。但当前 `articles` 表只有迁移 02 的 4 篇演示文章，无可保护内容，因此**不写 Supabase 专属的临时补丁**，改由 **S2 用 `users.is_admin` 数据库列根治**。不变的原则：**绝不用用户可自改的字段做授权判断** | `03_update_is_admin.sql:7-8` | 🔴 P0 → 延后至 S2 |
 | 2 | 生产构建注入 Trae 推广角标 | `vite.config.ts:24` `prodOnly: true` | 🔴 P0 |
 | 3 | `Projects.tsx` 双重死代码：无路由 + `skin` 色板不存在 | `App.tsx` 无 `/projects`；`tailwind.config.js` 无 `skin` | 🟠 P1 |
 | 4 | `ArticleDetail.tsx` 仍 import `mockData` 做兜底 | `ArticleDetail.tsx:7` | 🟠 P1 |

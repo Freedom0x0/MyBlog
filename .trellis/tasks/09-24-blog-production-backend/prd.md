@@ -39,7 +39,7 @@
 
 | 编号 | 缺陷 | 证据 |
 |---|---|---|
-| D1 | 🔴 `is_admin()` 读 `user_metadata`，任何登录用户可通过 `updateUser({data:{user_name:'guoshaoran'}})` 提权 | `supabase/migrations/03_update_is_admin.sql` |
+| D1 | 🔴 `is_admin()` 读 `user_metadata`，任何登录用户可通过 `updateUser({data:{user_name:'guoshaoran'}})` 提权。**已用桩 `auth.jwt()` 实测确认可利用**。**2026-09-28 决定：不在缺陷清理任务中修补**——库里只有迁移 02 的 4 篇演示文章，无可保护内容，而 Supabase 专属补丁会被 S1/S2 替换掉。**改由 S2 用 `users.is_admin` 数据库列根治** | `supabase/migrations/03_update_is_admin.sql:7-8` |
 | D2 | 🔴 生产构建注入 Trae 推广角标（`prodOnly: true`，本地不可见） | `vite.config.ts:24` |
 | D3 | 🟠 `Projects.tsx` 双重死代码：无路由，且使用的 `skin` 色板在 Tailwind 中不存在 | `src/App.tsx`、`tailwind.config.js` |
 | D4 | 🟠 文章详情仍 import `mockData` 兜底 | `src/pages/ArticleDetail.tsx:7` |
