@@ -21,7 +21,8 @@
   "children": [
     "09-24-blog-portal-s0-foundation",
     "09-28-blog-portal-s1-read-api",
-    "09-28-blog-portal-s2-auth"
+    "09-28-blog-portal-s2-auth",
+    "09-29-blog-portal-s3-write-path"
   ],
   "parent": null,
   "relatedFiles": [],
