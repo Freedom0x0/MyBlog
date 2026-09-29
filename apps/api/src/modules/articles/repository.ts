@@ -1,5 +1,5 @@
 import type { Pool } from 'pg'
-import type { ArticleSummary } from 'shared'
+import type { AdminArticleSummary, ArticleStatus, ArticleSummary } from 'shared'
 import type { Cursor } from '../../lib/pagination.js'
 
 /**
@@ -72,12 +72,56 @@ const DETAIL_COLUMNS = `
   published_at, content_md, status, updated_at
 `
 
+/**
+ * Columns for the admin list: the public list's set plus `status` and the raw
+ * `updated_at`, and — like the public list — no `content_md`.
+ *
+ * The cursor key is `updated_at` rather than `published_at` because that is the
+ * column this query orders by, and a keyset cursor must be the sort key. It is
+ * spelled out with `to_char` at microsecond precision for exactly the reason
+ * `LIST_COLUMNS` documents above: the payload's ISO string is millisecond-only,
+ * and a keyset bound truncated below the row it came from repeats that row on the
+ * next page.
+ */
+const ADMIN_LIST_COLUMNS = `
+  id, slug, title, excerpt, category, tags, cover_image, read_time,
+  published_at, status, updated_at,
+  to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_key
+`
+
 export interface ListParams {
   /** Ask for one more than the page size — see `listPublished`. */
   limit: number
   cursor?: Cursor
   tag?: string
   category?: string
+}
+
+/** Parameters for {@link ArticleRepository.adminList}. */
+export interface AdminListParams {
+  /** Ask for one more than the page size — see `listPublished`. */
+  limit: number
+  cursor?: Cursor
+  /**
+   * Narrow to one status. Absent means *every* status, which is the endpoint's
+   * default and the whole reason it exists. The value arrives already checked
+   * against the enum by `AdminListQuerySchema`, so an out-of-vocabulary string
+   * cannot come back as this method returning an empty page and be mistaken for
+   * "there are no such articles".
+   */
+  status?: ArticleStatus
+}
+
+/** A row as the admin list query returns it, before pagination decisions are made. */
+export interface AdminListRow {
+  /** Internal id: the keyset tie-breaker. Never exposed in a response. */
+  id: string
+  /**
+   * Full-precision UTC text of `updated_at`, used only to build a cursor — see
+   * `ArticleListRow.cursorKey` for why the wire value is not good enough.
+   */
+  cursorKey: string
+  summary: AdminArticleSummary
 }
 
 /** Fully-resolved values for a new draft; the service has already applied defaults. */
@@ -196,6 +240,79 @@ export class ArticleRepository {
     if (row === undefined) return null
 
     return toArticleRecord(row)
+  }
+
+  /**
+   * The most-recently-changed page, in every status (S3-R20, design §1.4).
+   *
+   * A separate statement rather than a `includeDrafts` flag on `listPublished`,
+   * for the reason that method's own comment gives: `listPublished` is named for
+   * `status = 'published'`, and making it optionally return drafts would be a lie
+   * at the boundary that every later caller has to re-derive. It would also be the
+   * wrong order — the public keyset sorts on `published_at`, where every draft
+   * shares one NULL sort key and lands in a uuid-ordered heap at the tail. That is
+   * no order at all for exactly the rows this endpoint exists to find, which is
+   * why ordering by "last changed" is a requirement (S3-R20) and not a preference.
+   *
+   * `updated_at`, not `created_at`: editing a week-old draft has to bring it back
+   * to the top of the list, because "the thing I was just working on" is what the
+   * admin page is for.
+   *
+   * The order needs no `NULLS` modifier — the column is `not null` (0001:40), so
+   * neither `nulls first` nor `nulls last` can change a row's position. Writing
+   * `nulls last` here anyway would be a claim about the data that nothing enforces.
+   *
+   * No index backs this scan yet. That is a recorded decision, not an oversight:
+   * design §1.4 states the cost, why it is acceptable at blog scale, and the
+   * condition that reopens it (a visibly slow list page, then an index whose
+   * `ORDER BY` is matched to it verbatim and *proved* with `EXPLAIN` against a
+   * few-thousand-row table, per conventions §9 — not against this one).
+   *
+   * Rows are fetched `limit + 1`, as in `listPublished`: the extra row answers
+   * "is there a next page?" without a `COUNT(*)` per page.
+   */
+  async adminList(params: AdminListParams): Promise<AdminListRow[]> {
+    // `true` as the base keeps the AND-join below valid when neither filter is
+    // present — the admin list's default is all statuses, so an empty predicate
+    // list is the normal case, not an edge one. The planner folds the constant
+    // away; there is no index here to confuse.
+    const conditions: string[] = ['true']
+    const values: unknown[] = []
+    const param = (): string => `$${values.length + 1}`
+
+    if (params.status !== undefined) {
+      conditions.push(`status = ${param()}`)
+      values.push(params.status)
+    }
+
+    if (params.cursor !== undefined) {
+      // Placeholders numbered explicitly, for the reason spelled out in
+      // `listPublished`: `param()` twice inside one template string, before the
+      // pushes, produces the same number twice and Postgres then tries to cast one
+      // value to two types.
+      const timeParam = `$${values.length + 1}`
+      const idParam = `$${values.length + 2}`
+      values.push(params.cursor.p, params.cursor.i)
+
+      // Row-value comparison against the *sort key*, `(updated_at, id)`, in the
+      // same descending direction the ORDER BY establishes. This is the one place
+      // the two lists genuinely differ: same mechanism, different key.
+      conditions.push(`(updated_at, id) < (${timeParam}::timestamptz, ${idParam}::uuid)`)
+    }
+
+    values.push(params.limit)
+    const limitParam = `$${values.length}`
+
+    const result = await this.pool.query<AdminListSourceRow>(
+      `select ${ADMIN_LIST_COLUMNS}
+         from articles
+         where ${conditions.join('\n           and ')}
+         order by updated_at desc, id desc
+         limit ${limitParam}`,
+      values,
+    )
+
+    return result.rows.map(toAdminListRow)
   }
 
   /**
@@ -357,6 +474,22 @@ interface ArticleRecordRow {
   updated_at: Date
 }
 
+/** A row as `ADMIN_LIST_COLUMNS` returns it — the admin list's projection. */
+interface AdminListSourceRow {
+  id: string
+  slug: string
+  title: string
+  excerpt: string
+  category: string
+  tags: string[]
+  cover_image: string | null
+  read_time: number
+  published_at: Date | null
+  status: string
+  updated_at: Date
+  cursor_key: string
+}
+
 function toArticleRecord(row: ArticleRecordRow): ArticleRecord {
   return {
     id: row.id,
@@ -398,6 +531,36 @@ function toListRow(row: ArticleRow): ArticleListRow {
       coverImage: row.cover_image,
       readTime: row.read_time,
       publishedAt: row.published_at.toISOString(),
+    },
+  }
+}
+
+/**
+ * Map an admin list row.
+ *
+ * The counterpart to `toListRow`, and deliberately without its precondition: a
+ * null `published_at` there means the database broke its own invariant, while here
+ * it is simply a row that has never been published. Throwing on it would make the
+ * endpoint unable to list drafts — the one thing it exists for.
+ *
+ * No `content` key, because no `content_md` column: the response shape is decided
+ * by the projection, not by remembering to delete a field afterwards.
+ */
+function toAdminListRow(row: AdminListSourceRow): AdminListRow {
+  return {
+    id: row.id,
+    cursorKey: row.cursor_key,
+    summary: {
+      slug: row.slug,
+      title: row.title,
+      excerpt: row.excerpt,
+      category: row.category,
+      tags: row.tags,
+      coverImage: row.cover_image,
+      readTime: row.read_time,
+      publishedAt: row.published_at === null ? null : row.published_at.toISOString(),
+      status: row.status,
+      updatedAt: row.updated_at.toISOString(),
     },
   }
 }

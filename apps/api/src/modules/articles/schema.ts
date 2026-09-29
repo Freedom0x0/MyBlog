@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import type {
+  AdminArticlePage,
+  AdminArticleSummary,
   ArticleAdmin,
   ArticleDetail,
   ArticlePage,
@@ -104,6 +106,45 @@ export const ArticleAdminSchema = ArticleSummarySchema.extend({
   updatedAt: z.iso.datetime(),
 })
 
+// ── Admin reads (S3-R20 ~ S3-R21, design §1.4) ────────────────────────────────
+
+/**
+ * One row of the admin list: the admin article shape minus its body, derived by
+ * `omit` for the same reason `AdminArticleSummary` is derived by `Omit` in
+ * `shared` — the "no bodies in a list" rule cannot then silently stop holding
+ * when a field is added to `ArticleAdminSchema`.
+ */
+export const AdminArticleSummarySchema = ArticleAdminSchema.omit({ content: true })
+
+export const AdminArticlePageSchema = z.object({
+  data: z.array(AdminArticleSummarySchema),
+  next: z.object({ cursor: z.string() }).nullable(),
+  limit: z.number().int(),
+})
+
+/**
+ * Query for `GET /api/v1/admin/articles`.
+ *
+ * `limit` repeats the public list's bound rather than a copy of a different number:
+ * the ceiling is a control on how many rows one request may read, and the admin
+ * surface has no claim on a looser one (the sort key differs, the shape of the DoS
+ * does not).
+ *
+ * `status` is validated against the enum the database `check` mirrors. Note what
+ * the check is actually for, because it is not the usual one: a bad status in a
+ * `where` clause cannot violate a constraint — constraints bind writes — so an
+ * unvalidated value would reach SQL and match nothing. The failure it prevents is
+ * therefore the misleading one, a 200 with an empty page reading as "you have no
+ * archived articles" when the caller typed `Archived`. The enum turns that into a
+ * 400 naming the field, which is what `AdminListQuerySchema`'s test asserts
+ * (verified by removing the enum: the response becomes a 200 with `data: []`).
+ */
+export const AdminListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(10),
+  cursor: z.string().min(1).max(512).optional(),
+  status: ArticleStatusSchema.optional(),
+})
+
 /**
  * Drift guards. These are exported so `noUnusedLocals` does not reject them, and
  * they are the reason the contract can live in `shared` as plain interfaces while
@@ -128,6 +169,16 @@ export const PAGE_MATCHES_CONTRACT: AssertEquivalent<
 export const ADMIN_MATCHES_CONTRACT: AssertEquivalent<
   z.infer<typeof ArticleAdminSchema>,
   ArticleAdmin
+> = true
+
+export const ADMIN_SUMMARY_MATCHES_CONTRACT: AssertEquivalent<
+  z.infer<typeof AdminArticleSummarySchema>,
+  AdminArticleSummary
+> = true
+
+export const ADMIN_PAGE_MATCHES_CONTRACT: AssertEquivalent<
+  z.infer<typeof AdminArticlePageSchema>,
+  AdminArticlePage
 > = true
 
 export const CREATE_MATCHES_CONTRACT: AssertEquivalent<

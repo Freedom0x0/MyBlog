@@ -1,8 +1,10 @@
 import {
   ERROR_CODES,
+  type AdminArticlePage,
   type ArticleAdmin,
   type ArticleDetail,
   type ArticlePage,
+  type ArticleStatus,
   type CreateArticleInput,
   type ImportArticleFile,
   type ImportArticleResult,
@@ -104,6 +106,71 @@ export class ArticleService {
       publishedAt: found.publishedAt,
       content: found.contentMd,
     }
+  }
+
+  // ── admin read path (S3-R20 ~ S3-R21) ───────────────────────────────────────
+
+  /**
+   * The admin list: every status, newest change first.
+   *
+   * Page assembly mirrors `list()` instead of sharing a helper with it, on purpose.
+   * The two agree on envelope shape (`data`/`next`/`limit`) but not on key — one
+   * cursor is a `published_at`, the other an `updated_at` — and merging them into
+   * one generic would let a change to admin paging reach a public response that has
+   * been stable since S1. `list()` also carries a precondition this must not
+   * inherit: a null `published_at` is a broken invariant there and a draft here.
+   */
+  async listForAdmin(input: {
+    limit: number
+    cursor?: string
+    status?: ArticleStatus
+  }): Promise<AdminArticlePage> {
+    const rows = await this.repository.adminList({
+      // One extra row answers "is there a next page?" without a COUNT(*).
+      limit: input.limit + 1,
+      cursor: input.cursor === undefined ? undefined : toCursor(input.cursor),
+      status: input.status,
+    })
+
+    const hasMore = rows.length > input.limit
+    const page = hasMore ? rows.slice(0, input.limit) : rows
+    const last = page.at(-1)
+
+    return {
+      data: page.map((row) => row.summary),
+      // Built from the row's full-precision `cursorKey`, never the millisecond
+      // `updatedAt` the client sees — see `ArticleListRow.cursorKey`.
+      next: hasMore && last !== undefined
+        ? { cursor: encodeCursor({ p: last.cursorKey, i: last.id }) }
+        : null,
+      limit: input.limit,
+    }
+  }
+
+  /**
+   * One article by slug, whatever its status — the admin detail (S3-R21).
+   *
+   * No third SQL statement: `findBySlug` already promises only "whatever matched
+   * this slug" and leaves visibility to the service, so this is not a second copy
+   * of the visibility rule sitting next to `findPublished` — it is the absence of
+   * one. `findPublished` answers "may the public see this?"; this answers "may an
+   * admin?", and the answer to the second is "yes, always", reached exclusively
+   * through `requireAdmin`. The public endpoint keeps returning 404 for the same
+   * draft: this route opens no hole, it is the guarded door (design §1.4 refuses
+   * `?includeDraft` because that would hand the request the switch).
+   *
+   * A slug that matches nothing answers 404 `ARTICLE_NOT_FOUND`, the same code the
+   * public path uses. Nothing richer is warranted: every article in every status is
+   * already readable here, so a missing row is simply a missing row.
+   */
+  async getForAdmin(slug: string): Promise<ArticleAdmin> {
+    const found = await this.repository.findBySlug(slug)
+
+    if (found === null) {
+      throw new ApiError(ERROR_CODES.articleNotFound, `No article with slug '${slug}'`, 404)
+    }
+
+    return toArticleAdmin(found)
   }
 
   // ── admin write path ────────────────────────────────────────────────────────

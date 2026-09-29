@@ -147,6 +147,40 @@ export interface ArticleAdmin {
 }
 
 /**
+ * One row of `GET /api/v1/admin/articles` — `ArticleAdmin` without `content`.
+ *
+ * Defined by subtraction rather than spelled out again so the two cannot drift:
+ * anything added to the admin article shape appears in the list shape too, which
+ * is exactly what a list-row type should mean.
+ *
+ * The subtraction itself is the point. A page of up to fifty articles carrying
+ * fifty full markdown bodies is megabytes per request that no list UI renders —
+ * one of this repository's own seed fixtures is a 117 KiB article — and the
+ * repository's explicit column list exists precisely so a payload cannot widen by
+ * accident (see `LIST_COLUMNS` in the articles repository). What the admin list
+ * does need is the two fields the public summary has never carried — `status`
+ * (which row is a draft?) and `updatedAt` (when did I last touch it?) — because
+ * "sort by most recently changed and show me the state" is the whole reason this
+ * endpoint exists.
+ */
+export type AdminArticleSummary = Omit<ArticleAdmin, 'content'>
+
+/**
+ * Cursor page of admin list rows. Same envelope as {@link ArticlePage} on purpose:
+ * `next` is null on the last page rather than absent, and `limit` echoes what the
+ * caller asked for.
+ *
+ * Note the `data` type differs from `ArticlePage`, not just its size — so this is
+ * a second interface rather than a type parameter on the first. Keeping the two
+ * separate means the public list can never start serving draft rows.
+ */
+export interface AdminArticlePage {
+  data: AdminArticleSummary[]
+  next: { cursor: string } | null
+  limit: number
+}
+
+/**
  * Body of `POST /api/v1/articles`.
  *
  * Deliberately carries no `status`: creation always lands a draft, so a client

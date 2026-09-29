@@ -2,6 +2,8 @@ import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod'
 import { requireAdmin } from '../auth/guards.js'
 import { requireCsrfHeader } from '../../plugins/auth.js'
 import {
+  AdminArticlePageSchema,
+  AdminListQuerySchema,
   ArticleAdminSchema,
   ArticleDetailSchema,
   ArticlePageSchema,
@@ -46,6 +48,47 @@ export const articleRoutes: FastifyPluginAsyncZod = async (app) => {
       },
     },
     async (request) => service.getPublished(request.params.slug),
+  )
+
+  /**
+   * Admin reads (S3-R20 ~ S3-R21, design §1.4).
+   *
+   * `requireAdmin` only, with **no** `requireCsrfHeader` — the deliberate
+   * asymmetry with the four writes below. CSRF protection exists because a
+   * cross-site page can make a request that *changes state*; a read under an
+   * authorisation check has nothing to forge, and demanding the header would only
+   * add failures that mean nothing: a typed-in URL, a top-level browser navigation,
+   * a read-only deep link into the admin page — none of which can set a custom
+   * header, and none of which would harm anything. The authorisation is the guard;
+   * the header on a GET is noise on top of it, and noise a future reader would have
+   * to reverse-engineer a reason for.
+   *
+   * These are the only routes that serve drafts. That is carried entirely by
+   * `requireAdmin`: the same hook, in the same first position, as the writes below,
+   * so a logged-in non-admin gets 403 here exactly as they do on `PATCH`.
+   */
+  app.get(
+    '/api/v1/admin/articles',
+    {
+      onRequest: [requireAdmin],
+      schema: {
+        querystring: AdminListQuerySchema,
+        response: { 200: AdminArticlePageSchema },
+      },
+    },
+    async (request) => service.listForAdmin(request.query),
+  )
+
+  app.get(
+    '/api/v1/admin/articles/:slug',
+    {
+      onRequest: [requireAdmin],
+      schema: {
+        params: SlugParamsSchema,
+        response: { 200: ArticleAdminSchema },
+      },
+    },
+    async (request) => service.getForAdmin(request.params.slug),
   )
 
   /**
