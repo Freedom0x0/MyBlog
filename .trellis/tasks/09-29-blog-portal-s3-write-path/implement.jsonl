@@ -1,4 +1,4 @@
 {"file": ".trellis/spec/backend/architecture.md", "reason": "S3 要扩 repository/service/routes 并新增 storage 模块：分层方向、SQL 只在 repository、app.ts 不 listen、fastify-plugin 与 .js 扩展名都是硬约束（S2 复核已抓到过一次 SQL 越层）"}
-{"file": ".trellis/spec/backend/conventions.md", "reason": "§2 错误契约（23505 等驱动码绝不外泄——本阶段 slug 冲突会正面撞上）、§8 迁移纪律（publish 用到 is distinct from，需执行验证）、§9 索引与 ORDER BY、§10 CI env 与必填项契约"}
-{"file": ".trellis/spec/guides/verification-checklist.md", "reason": "本阶段四条性质只能靠跑出来：幂等=连跑两次零变更、slug 改后评论仍在=外键证明、presigned=CORS 实测、删除权限=反向测试"}
+{"file": ".trellis/spec/backend/conventions.md", "reason": "§2 错误契约（23505 等驱动码绝不外泄——本阶段 slug 冲突会正面撞上）、§9 索引与 ORDER BY、§10 CI env 与必填项契约；§8 迁移纪律本阶段无迁移可适用（导入不需要新列），若实施中真加了列则回来补执行验证"}
+{"file": ".trellis/spec/guides/verification-checklist.md", "reason": "本阶段的性质只能靠跑出来：导入批次中一份格式错=库里一篇都没多、slug 改后评论仍在=外键证明、presigned=CORS 实测、删除权限=反向测试"}
 {"file": ".trae/documents/technical_architecture.md", "reason": "D8（管理员不能删他人评论）与 D10（评论按可变 slug 文本关联）的原始证据与行号，本阶段是它们的关闭点"}

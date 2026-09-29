@@ -37,7 +37,7 @@ pnpm --filter api test -- articles-write
 ### A 执行结论（已跑过的真账，不是计划）
 
 - 全量闸：`pnpm -r test` **153 passed（147 基线 + 6 新增）**、`-r lint`、`-r check` 全绿。阶段 A 共 22 条集成测试。
-- **复核抓到一个真实缺陷**：首发时间戳原本由 service「先读 `existing.publishedAt` 再决定要不要写」判定，两个并发首发都会读到 null，后提交者覆盖先提交者的首发时间。改法：service 只递交**候选**时间戳，repository 用 `published_at = coalesce(published_at, $n::timestamptz)` 在行锁内决定——与 §3.1 用 `is distinct from` 把比较下推进 SQL 是同一个理由。
+- **复核抓到一个真实缺陷**：首发时间戳原本由 service「先读 `existing.publishedAt` 再决定要不要写」判定，两个并发首发都会读到 null，后提交者覆盖先提交者的首发时间。改法：service 只递交**候选**时间戳，repository 用 `published_at = coalesce(published_at, $n::timestamptz)` 在行锁内决定——与 B 阶段把"父评论是否同一篇文章"写进 insert 的 `where` 是同一个理由：**"读一次再分支"在两个并发写之间不成立，而这个判断本来就属于持有行锁的那条语句。**
   **推广到 B–G**：任何「先查再分支写」都是读后写竞态。判断条件属于 SQL 的（是否为空、是否变化、是否冲突），一律下推，不要在应用层读一遍再决定。
 - 新增并发**改 slug**测试（S3-R3 的延伸，原计划漏了）：恰好一个 200、一个 409 `SLUG_CONFLICT`，且败方仍持有原 slug。
 - 变异检验做过两次：把 schema 字段改错类型 → 两个 `*_MATCHES_CONTRACT` 如期编译失败；回退 coalesce 修复 → repository 层的固定时间戳测试确定性失败。**注意**：HTTP 层的并发首发测试在缺陷代码上会因为同一毫秒而侥幸通过，所以它只是哨兵，确定性证明放在 repository 层用固定时间戳的那条——写并发测试时别把这种测试当证据。
@@ -68,24 +68,58 @@ pnpm --filter api test -- articles-write
 
 ---
 
-## C · 发布流水线
+## C · Markdown 导入端点（原"发布流水线"，形状已于 2026-09-29 按用户决定改）
 
-- [ ] `src/db/publish.ts`：复用 `frontmatter.ts`，读 `content/*.md`
-- [ ] 单事务；条件更新用 `is distinct from`；不触碰 `is_admin`
-- [ ] 默认 `draft`；显式 `status: published` 才发布
-- [ ] production 下拒绝裸跑；先打印目标库主机与 slug 列表
-- [ ] 仓库根建 `content/` 目录 + 一篇真实示例文章（取代演示内容的位置）
+CLI 方案作废的理由与取舍记在 design §3；这里只留可执行的清单。本阶段**只做后端**——导入的按钮在 D 阶段（前端那一刀本来就要动 `apiClient` 和编辑页）。
 
-**验证（幂等的真实含义）**：
+- [x] `packages/shared`：`ImportArticlesRequest`（`files: [{ name, markdown }]`）、`ImportArticleResult`（`kind: 'created' | 'conflict'`）、`ImportArticlesResponse`
+- [x] `articles/schema.ts`：Zod 校验 + 契约漂移守卫（数组非空、长度上限、单篇与整批字节上限、`name` 长度与字符范围）
+- [x] `articles/service.ts`：`importAll(files)` —— 先把**所有**文件过 `parseFixture`（任一无效就抛，一行不写），全通过后再逐篇调已有的 `create()`，且**把 status 强制成 draft**
+- [x] 复用而非搬运：`parseFixture` 留在 `src/db/frontmatter.ts`，由 articles 模块 import。若觉得"db 目录里的东西被 service 引用"刺眼，就把它移到 `src/lib/`——但**只搬一次，别 copy**，S1 立它就是为了让两个阶段共用一份
+- [x] `articles/routes.ts`：`POST /api/v1/articles/import`，`onRequest: [requireAdmin, requireCsrfHeader]`
+- [x] ~~仓库根 `content/` 目录 + 示例文章~~ 取消：没有命令行同步就不需要它，`apps/api/fixtures/` 继续服务 seed 与测试
+- [x] **`bodyLimit` 要显式决定**：Fastify 默认 1 MB，一批 markdown 很容易撞上去。超限时框架在 handler **之前**抛 `FST_ERR_CTP_BODY_TOO_LARGE`（`413`，已在 `fastify@5.12.5/lib/errors.js` 核对），**已经**被 `errorHandler.ts` 的 `CODE_BY_STATUS[413]` 翻译成 `PAYLOAD_TOO_LARGE`。（我上一版在这里写的"它和 DTO 的上限必须是同一个数"是**反的**：框架先执行、DTO 后执行，两者相等时框架永远先抢答，Zod 那条更有用的消息就永远不会出现。正确关系是 `bodyLimit` 明显**大于** DTO 各上限之和。）
 
-```bash
-pnpm --filter api publish
-# 记录 articles 的 updated_at 与内容哈希
-pnpm --filter api publish
-# 断言：第二次零行变更，updated_at 完全不变
-```
+**C 执行结论（已跑过的真账）**
 
-- [ ] 断言写成测试（`publish.test.ts`），不是人肉比对输出
+- `bodyLimit` 用**路由级**选项（`fastify@5.12.5` 的 `types/route.d.ts:67` 核实 `RouteShorthandOptions` 有此字段而 `RouteOptions` extends 它），只给导入这一条路由，全站默认 1 MiB 不动。数值：单篇 128 KiB、整批正文 2 MiB、20 份、名字 255 字符 → DTO 允许的最大**内容**约 2.1 MiB，走线最坏约 **4.1 MiB**（JSON 转义把换行/引号/反斜杠每个 1 字节撑成 2 字节，只会变大不会变小），对 8 MiB 的路由上限仍有约 2 倍余量。**这条大小关系本身被变异验证过**：把 `bodyLimit` 降到与单篇上限相等，两条本该由 Zod 回答的测试变成 413 而红。
+- 反向对照测试：往 `POST /api/v1/articles` 塞 2 MiB 仍得 413——证明"给导入放宽"没有顺手把别的端点也放宽（这是最容易偷偷发生的回归，用一条断言钉住）。
+- **`toDraftInput` 里把解析结果再过一遍 `CreateArticleSchema`** 是实现者超出清单的一处添加，我核对后判定**必须保留**：`parseFixture` 只校验 front-matter 的**形状**，而 `articles` 表对 `excerpt`/`content_md` 没有长度或空值 check（`0001_portal_schema_v2.up.sql:23-45` 只有 `slug unique`、`read_time > 0`、status 相关与 `published_needs_timestamp`）。少了这一步，导入就是一个绕过 `POST /api/v1/articles` 字段边界的侧门——空 `excerpt`、空正文都能落库。做法是复用既有 DTO，没有新造第二套上限。
+- 冲突只按 `error instanceof ApiError && error.code === slugConflict` 收集，其余重抛；变异"把所有 ApiError 都当冲突"只让那一条重抛测试变红。
+- 计划里 `import.test.ts` 这个文件名与实际 `articles-import.test.ts` 不一致，按后者（与 `articles-write`/`comments-write` 同族命名）。design §1 的端点表缺导入这一行——我在"C 执行结论"里写了"已补"但**当时并没有真的补**，是复核阶段才实际加上的；design §3 的草图原本是裸数组，与实现的 `{ results }` 不符，也一并对齐。
+
+**主控对复核三个待决点的定案**
+
+- **`parseFixture` 不搬出 `src/db/`**。复核独立判定它不违反 architecture §1（该节禁的是 service 引用 `request` 或含 `SELECT`，这条是纯文本函数），搬迁要牵动 `seed.ts` 与 `frontmatter.test.ts` 的 import 才能消除一个目录名的观感问题。**明确不采纳**。
+- **写批次中途的非冲突失败**（连接断、约束意外违反）→ 抛出、整批逐篇结果随之丢失，不回滚。理由与恢复路径写进 design §3.2：连接已不可信时发 200 等于谎称处理完整；重导同一批会以 `conflict` 逐篇报出而不会写出重复行，所以"再点一次"是安全补救。**D 阶段界面别把它做成静默重试。**
+- **`storedRows([])` 加运行时报错**（已加）。这不是"给不可能的场景写校验"：一个测试助手在收到空列表时静默恒真，正是本项目"零匹配 grep 与什么都没扫的 grep 无法区分"那条规则要防的假绿。
+- **复核自陈未验证的三项，归入后续**：并发导入同 slug 无导入层专门测试（依赖 A 阶段 `on conflict do nothing` 与 A 的并发测试）；`bodyLimit` 的 JSON 转义膨胀估算（最坏 4.1 MiB）是纸面算术，没有真发过 4 MiB 全转义请求；pg 驱动错误在导入 HTTP 层的擦除只有 M5 变异与代码推理，没有实际制造一次约束违反。三项都不是"已知坏了"，是"没测到"，S6/S7 补测试时优先捞回来。
+
+### C 复核（2026-09-29，第二双眼睛，全部实跑变异）
+
+- 上面"C 执行结论"里的每一条断言都经过再验证，全部成立：**边解析边写**变异 → 2 红（HTTP 行数哨兵 + 调用边界确定性哨兵）；给 `toDraftInput` 塞 `status` → `tsc` **编译期**就报 TS2353（结构性防线真实存在）；冲突收集放宽为"任何 ApiError" → 恰好 1 红（重抛测试）；`bodyLimit` 从路由级改为全局 8 MiB → 恰好 1 红（"别的端点仍守默认"对照测试）；`bodyLimit` 降到与单篇上限相等 → 恰好 2 红（与本文上面记录的数字一致）；errorHandler 透传 `error.code` → 7 红（413 与 400 两条路径都抓到）；第二次导入的 kind 断言反转成 created → 1 红；把 `shared` 的 `message` 改可选 → `tsc` 报在 `IMPORT_RESPONSE_MATCHES_CONTRACT` 那一行（守卫有效）；去掉 `CreateArticleSchema` 交叉校验 → 1 红（证明它是唯一的门，不是重复兜底）。
+- 全量 api 套件 17 文件 / 197 测试全绿；跑完**实查库**：`ai-%` 文章行 0、`ai-%` 用户行 0、`articles` 总数回到 seed 的 7。变异逐条还原后复跑变绿。
+- 修正两处文档与代码不符（点名）：**design §1 端点表此前并没有补上导入这一行**（上一段"已补"的说法不实，本次真的补上了）；design §3 草图的裸数组响应与实际 `{ results: [...] }` 不一致，已按实现定稿并写明理由。另把 `schema.ts` 里"DTO 最大约 2.1 MiB"的算术补上 JSON 转义膨胀（最坏 ~4.1 MiB），大小关系结论不变。
+- 独立判定：`import { parseFixture } from '../../db/frontmatter.js'` **不违反** architecture §1 的原文（"service 不得碰 `request`、不得含 `SELECT`"——两者皆无，它是纯文本函数）；`db/` 目录归属只是历史位置的观感问题，若要消除，最小改法是 `git mv` 到 `src/lib/` 并同步 seed 与测试的两处 import。本轮不搬，交主控决定。
+- 遗留观察（非缺陷）：阶段 2 写入中途若抛出**非冲突**错误（如数据库宕机），此前已写成的几篇会留在库里而整批响应是 4xx/5xx，逐篇结果丢失。**已定案**，理由与恢复路径写进 design §3.2——不回滚也不返回部分结果是对的（连接不可信时发 200 等于谎称处理完整），而重导同一批会把已写成的那些以 `conflict` 逐篇报出、不产生重复行，所以"再点一次"是安全补救。D 阶段界面**不得做成静默重试**。
+
+**验证**（全部写成 `import.test.ts` 集成测试，人肉点界面不算）：
+
+- 3 份合法 → 3 篇草稿出现，公开列表一篇都查不到
+- 2 份合法 + 1 份缺 `title` → 400，且**库里文章总数不变**（"解析失败零写入"的唯一证明方式就是数一遍）
+- front-matter 写 `status: published` 的一份 → 导入后 `status` 仍是 `draft`（R9 的正面证据）
+- 同一份导入两次 → 第二次该篇 `kind: 'conflict'`，库里仍只有一条
+- 反向权限：无凭证 401、普通用户 403、缺 CSRF 头 403
+- 超限：单篇过大与份数过多各自 400/413，且都不落库
+- 错误响应里不出现 `23505` / `23503` / 解析器抛的原始堆栈
+
+---
+
+## C2 · 内容起点（**不做搬迁**，2026-09-29 用户决定）
+
+Supabase 里的既有文章直接废弃，不导出、不核对、不搬。因此 D 切换完成后，站点的真实内容数量是 **0**，第一篇必须来自编辑器手写或 C 的导入端点——这是决定的后果，不是缺陷，但要知道它长什么样：切完那天首页是空的。
+
+- [ ] 定一下 `apps/api/fixtures/` 那些演示文章（`normal-published`、`draft-unpublished`、`backslashes` 等 7 篇）的处置：它们是 seed 与测试的数据来源，**不能删**；但生产环境不该有它们。`seed.ts` 已经拒绝在 `NODE_ENV=production` 下跑，所以只要部署流程里不调 seed 就没有泄漏——在 S8 的部署清单上记一笔"不要跑 seed"即可。
 
 ---
 
@@ -94,6 +128,7 @@ pnpm --filter api publish
 - [ ] `apiClient`：`request<T>` 的方法联合扩到 `PATCH | DELETE`，CSRF 头覆盖所有写方法
 - [ ] `articlesApi` 的 `upsertArticle` 改调 API；新增 `createArticle` / `deleteArticle`
 - [ ] `commentsApi` 新增 `postComment` / `deleteComment`
+- [ ] 管理页加"导入 Markdown"：`<input type="file" accept=".md" multiple>` → `File.text()` → `POST /api/v1/articles/import`（C 阶段的端点）→ 逐篇列出成功/冲突；冲突行给一个"覆盖"按钮，点了才发 `PATCH`。**导入后一律是草稿，界面上别放"导入并发布"**——那是 R9 想守住的那条线，加个按钮就会有人用它
 - [ ] 撤销 S2 的只读降级：恢复评论表单与删除按钮；管理员可见删除他人评论
 - [ ] `AdminArticleEditor` / `ArticleDetail` 的 `localStorage` 兜底**重新审视**：静默本地"保存成功"会让人误以为已发布（design §5 点明）
 - [ ] 删 `apps/web/src/lib/supabase.ts`；`pnpm --filter web remove @supabase/supabase-js`
@@ -106,6 +141,8 @@ grep -c "supabase" apps/web/package.json   # 期望 0
 pnpm -r lint check build && pnpm -r --if-present test
 git tag s3-detached-from-supabase          # 里程碑标签
 ```
+
+**并且真点一遍界面**（R19 决定丢弃旧内容，所以切换后列表是空的——"空库能写出一篇可见文章"才是这个里程碑的真实验收）：清掉演示文章行，然后在管理页新建一篇 → 确认公开列表查不到 → 点发布 → 首页与详情页出现它 → 在详情页发一条评论 → 删掉它。每一步都要看到结果，不接受只看接口返回。
 
 ---
 
@@ -125,12 +162,15 @@ git tag s3-detached-from-supabase          # 里程碑标签
 
 ## F · 图片上传
 
+**为什么要做这一块**：`AdminArticleEditor.tsx:180` 现在的"封面图"是一个**手填 URL 的文本框**——图片必须已经在某个地方可访问。一个走正规接口的博客不该靠人粘贴外链：图床搬了文章就裂，而且粘贴外部 URL 是 XSS 与追踪像素的入口。F 的全部意义就是把这个文本框换成真正的上传。
+
 - [ ] `POST /api/v1/uploads`（requireAdmin + CSRF）：入参 `contentType`/`size`
 - [ ] 校验：MIME 白名单、大小上限、**魔数嗅探在签发之后由 API 复核**（客户端声明可以撒谎）
 - [ ] key 由服务端随机生成，**绝不使用用户文件名**
 - [ ] presigned PUT 60 秒有效、单 key、带 `content-length-range`
 - [ ] 上传完成回调 `POST /api/v1/uploads/complete`：核实对象存在与真实类型，才返回可入库的 `publicUrl`
 - [ ] 启动期确保桶存在（不假设桶已在）
+- [ ] 前端：封面图字段旁加"上传"按钮（选文件 → 签发 → 直传 → 把返回的 `publicUrl` 填回字段）。字段仍可手填，不额外加限制——`cover_image` 只落在 `<img src>` 上，不是执行点
 
 **验证**：
 

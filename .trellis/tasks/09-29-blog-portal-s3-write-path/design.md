@@ -17,6 +17,8 @@ S3 之后前端只跟自建 API 说话，而 API 只在 localhost。所以：
 
 ```
 POST   /api/v1/articles            requireAdmin   → 201 ArticleAdmin
+POST   /api/v1/articles/import     requireAdmin + requireCsrfHeader, 路由级 bodyLimit 8 MiB
+                                                    → 200 ImportArticlesResponse | 400 | 413
 PATCH  /api/v1/articles/:slug      requireAdmin   → 200 ArticleAdmin | 404 | 409
 DELETE /api/v1/articles/:slug      requireAdmin   → 204 | 404
 POST   /api/v1/articles/:slug/comments     requireAuth → 201 CommentNode | 404
@@ -63,31 +65,42 @@ DELETE comment : 作者本人 → 204；管理员 → 204；其他人 → 403
 
 ---
 
-## 3. 发布流水线 `pnpm --filter api publish`
+## 3. Markdown 导入 `POST /api/v1/articles/import`
 
-**复用 `src/db/frontmatter.ts`，不写第二个解析器**——S1 定格式时就说了它服务两个阶段。
+> 原设计是 `pnpm --filter api publish` 命令行同步 `content/*.md`。2026-09-29 用户否决了
+> "需要记命令行的发布方式"——写作入口只留编辑器和文件导入。本节按新形状重写，
+> 并把因此作废的取舍留在原处说明，免得以后有人以为它是被"统一"掉的。
 
 ```
-读 content/*.md → 解析 → 逐篇：
-  insert ... on conflict (slug) do update
-    set title=..., content_md=..., category=..., tags=..., status=..., published_at=..., updated_at=now()
-    where articles.content_md is distinct from excluded.content_md
-       or articles.title        is distinct from excluded.title
-       or ...
+前端 <input type="file" accept=".md" multiple>
+  → 每份 File.text()
+  → POST /api/v1/articles/import { files: [{ name, markdown }] }
+  → 服务端逐份 parseFixture：任一无效 → 400，一行不写
+  → 全通过后逐篇 articles.service.create()（强制 draft）
+  → 返回 { results: [{ name, kind: 'created' | 'conflict' }, ...] }
 ```
 
-### 3.1 为什么用 `is distinct from` 而不是先查再比
+> 响应形状定稿为 `{ results: [...] }` 包装对象而非裸数组（实现时的决定，2026-09-29 复核确认）：
+> 与本 API 其余列表响应（`ArticlePage`/`CommentList`/`TagList`）同构，且将来可在不改响应类型的前提下
+> 增补计数字段。冲突条目**不开新错误码**——HTTP 仍是 200（见 §6）。
 
-先查再比是**读后写竞态**（两个进程同时跑会都判定"变了"），而且把比较逻辑放到应用层，将来每个写路径都要抄一遍。放在 SQL 里一条语句解决，且 NULL 语义正确（`cover_image` 可为 null）。
+**为什么解析放服务端**：`parseFixture` 住在 `apps/api/src/db/`，而 `apps/web` 不依赖 api 包。前端要解析只能把它搬去 `packages/shared`，那时校验就有两条路径，**前端那条可以绕过**——改一改请求体就能塞进解析器拒绝过的数据。放在服务端还顺带继承了 A 阶段 `service.create` 的写入规则（状态、`updated_at`、`published_at` 的 `coalesce`），而不是另开一条绕过它的写路。一条写库的路被两个入口共用，这才是它可信的原因。
 
-**可测的性质**：连跑两次，第二次**零行变更**，`updated_at` 不变。这是 S3-R9 的硬验收，也是"幂等"的真实含义——不是"跑两遍不报错"，而是"跑两遍等于跑一遍"。
+### 3.1 作废的设计：`is distinct from` 条件更新
+
+原方案要"连跑两次零变更、`updated_at` 不动"，因为命令行同步的前提是"文件是真相、库是投影，所以要能反复重放"。导入不是重放：每次点导入都是一个人刚做的决定，"这篇内容变了没有"由人自己判断，不需要 SQL 替他判断。条件更新语句因此不写。
+
+**仍然保留的性质**：并发导入同一 slug 仍恰好成功一次——A 阶段 `insertDraft` 的 `on conflict (slug) do nothing` 已经保证，不靠先查再写。
 
 ### 3.2 安全边界
 
-- `status` 默认 `draft`，除非 front-matter 明写 `published`（同步文件不该顺手发布）。
-- 拒绝 `NODE_ENV=production` 裸跑；执行前打印**目标库主机**与受影响 slug 列表。
-- 整个目录**一个事务**：半途失败不留"半套内容"。
-- 不触碰 `is_admin`（S2 复核已因此修过 seed 一次，同样规则）。
+- **一律 `draft`**，front-matter 的 `status` 仍参与格式校验（值必须合法）但不参与决定；`published` 也建草稿（R9）。
+- `requireAdmin` + `requireCsrfHeader`，与其余写端点同源。
+- 大小上限有三个层次，数值以实现为准：单篇 128 KiB、整批正文 2 MiB、份数 20，另有一条**路由级** `bodyLimit` 8 MiB 兜在最外面。上限不是防"文章太大"——markdown 是纯文本，128 KiB 对一篇博客已经荒谬地够用；它防的是把手按在选文件框上一次性送进几百份。`bodyLimit` 必须明显大于 DTO 允许的最大 body（含 JSON 转义膨胀），否则框架的 413 会抢在 Zod 那条说得出"哪一份、超了多少"的消息之前回答。
+- 解析失败零写入（R11）。写阶段中途的**冲突**不整批回滚：逐篇报告比"整批失败后人工猜是哪份坏了"更好用，而单条 insert 本来就是原子的。
+- 写阶段中途的**非冲突失败**（连接断、意外约束违反）→ 直接抛出，整批响应是 4xx/5xx，**已写成的那几篇不回滚，逐篇结果随之丢失**。定案而非疏漏：连接已经不可信，这时还返回 200 就是谎称请求被完整处理了。恢复路径是安全的——重导同一批时已落库的那些会以 `kind: 'conflict'` 逐篇报出，不会写出重复行（`insertDraft` 的 `on conflict do nothing`），所以"再点一次"这个最朴素的补救不产生垃圾。代价记在明处：D 阶段的界面**不能把它做成静默重试**，要让人看见"这次失败了，已写进去的会以下次导入的冲突形式出现"。
+- 不触碰 `is_admin`——这条与 seed 同源（S2 复核就是为此改过 seed 一次）。
+- 浏览器只能选到用户手动挑中的文件，读不到目录，也就无从"误同步整个项目"；R11 原来那条"拒绝在 production 裸跑、打印目标库主机"随 CLI 一并作废——导入永远经过一个已经连好库的服务端进程，没有"连错库"这个入口。
 
 ---
 
@@ -136,6 +149,9 @@ key 形态：uploads/<yyyy>/<mm>/<random32hex>.<ext-from-sniffed-type>
 
 | 条件 | 状态 | `code` |
 |---|---|---|
+| 导入批次中任一份 front-matter 非法 | 400 | `BAD_REQUEST`（消息里带文件名与解析器原话） |
+| 导入请求体超上限 | 413 | `PAYLOAD_TOO_LARGE` |
+| 导入时某篇 slug 已存在 | 200（该篇 `kind: 'conflict'`） | 不开新 code：其余篇可能已写成，HTTP 状态说的是这一**批**被接受了，冲突是逐篇数据 |
 | 创建时 slug 已存在 | 409 | `SLUG_CONFLICT` |
 | 目标 slug 不存在 | 404 | `ARTICLE_NOT_FOUND` |
 | `parentId` 属于另一篇文章 | 400 | `INVALID_COMMENT_PARENT` |
@@ -159,8 +175,8 @@ key 形态：uploads/<yyyy>/<mm>/<random32hex>.<ext-from-sniffed-type>
 | 硬删除 vs 软删除 | 硬删除 | 无回收站；需要时加 `deleted_at` + 部分索引 |
 | 403（评论）vs 404（草稿文章） | 分别处理 | 以后可能有人"统一"掉；注释写清理由 |
 | presigned vs 中转 | presigned，spike 验证 | MinIO CORS 不通则换中转，显式记录 |
-| 内容比对放 SQL | `is distinct from` | 需要 DB 方言支持（Postgres 有）；换库需重做 |
 | 类型由魔数决定 | 是 | 多写几十行；比信任客户端声明便宜 |
-| 幂等测试用 `updated_at` | 是 | 若将来加其他可变列，`where` 条件要同步扩，否则漏更新——**列清单集中在一处定义** |
+| 导入用端点而非 CLI | 端点（用户决定） | 失去"重放同步整个目录"；若将来真要 git→库 的自动同步，那是独立任务而非本阶段的回归 |
+| 解析在服务端 | 是 | 请求体是原文，边界上必须再加一层体积校验；换来的是"只有一条写库的路" |
 
-**最大风险**：S3 一次动写路径 + 新基础设施（MinIO）+ 前端 + CLI 四件事，容易做成"每件事都半成品"。缓解：`implement.md` 按 A→G 顺序，**每阶段结束都跑一次全量闸并且可停靠**；MinIO 整块放最后（F），因为它对"脱离 Supabase"这个里程碑不是必需的——真要做不完，F 可以整块推到 S4 之后，而主目标仍然达成。
+**最大风险**：S3 一次动写路径 + 新基础设施（MinIO）+ 前端三件事，容易做成"每件事都半成品"。缓解：`implement.md` 按 A→G 顺序，**每阶段结束都跑一次全量闸并且可停靠**；MinIO 整块放最后（F），因为它对"脱离 Supabase"这个里程碑不是必需的——真要做不完，F 可以整块推到 S4 之后，而主目标仍然达成。

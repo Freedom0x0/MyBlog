@@ -1,4 +1,4 @@
-{"file": ".trellis/spec/guides/verification-checklist.md", "reason": "核对每条『已验证』是否有命令输出支撑，尤其幂等与权限是否做了反向断言，以及结构守卫是否带对照断言"}
+{"file": ".trellis/spec/guides/verification-checklist.md", "reason": "核对每条『已验证』是否有命令输出支撑，尤其导入的零写入与权限是否做了反向断言，以及结构守卫是否带对照断言"}
 {"file": ".trellis/spec/backend/conventions.md", "reason": "核对写端点错误 code 属本项目词汇、迁移含可执行 down、CSRF 头覆盖所有写方法而非只 POST"}
 {"file": ".trellis/spec/backend/architecture.md", "reason": "核对新增 storage/uploads 模块的分层与 SQL 归属"}
-{"file": ".trellis/tasks/09-29-blog-portal-s3-write-path/design.md", "reason": "§1.2 SQLSTATE 处理、§2 403/404 的分别理由、§3.1 is distinct from、§4.2 key 与魔数校验、§6 错误矩阵是逐端点核对依据；§0 的分支约束必须被遵守"}
+{"file": ".trellis/tasks/09-29-blog-portal-s3-write-path/design.md", "reason": "§1.2 SQLSTATE 处理、§2 403/404 的分别理由、§3 导入端点（服务端解析、解析失败零写入、强制 draft）、§4.2 key 与魔数校验、§6 错误矩阵是逐端点核对依据；§0 的分支约束必须被遵守"}
