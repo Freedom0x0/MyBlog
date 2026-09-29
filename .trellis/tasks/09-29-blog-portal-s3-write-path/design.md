@@ -159,10 +159,13 @@ key 形态：uploads/<yyyy>/<mm>/<random32hex>.<ext-from-sniffed-type>
 
 ## 5. 前端与 apiClient
 
-- `apiClient` 的 `request<T>` 方法联合类型扩到 `PATCH | DELETE`；CSRF 头对所有写方法都要带（不只 POST）——**这一点容易漏**，`PATCH`/`DELETE` 与 `POST` 同级。
+- **`PATCH` 与 `DELETE` 必须进 CORS 的允许方法**。`@fastify/cors` 的默认 `methods` 是 `'GET,HEAD,POST'`，而 `app.ts` 只配了 `origin` 与 `credentials`——于是浏览器预检直接拒掉发布与删除。**这条在测试里看不见**：`app.inject()` 跑完整请求生命周期却没有同源策略，所以后端 220 条测试全绿、功能在浏览器里根本不可用。因此 `test/cors.test.ts` 把**预检响应本身**当被测对象（那是该设置唯一可观察的位置），且允许清单只放 API 真路由的动词，不因"常见"而加 `PUT`。
+- **204/205 不许解析 body**。`POST /auth/logout`、`DELETE /comments/:id`、`DELETE /articles/:slug` 都回空体；无条件 `response.json()` 会抛 `SyntaxError`、绕开统一的 `ApiError` 分支，表现成"点了没反应"（注销按钮此前正是这样）。
+- 本地开发必须用 `http://localhost:5175` 打开，不能用 `127.0.0.1:5175`：`origin` 配成纯字符串时插件**回显配置值**而不比对请求方，页面源与配置串不一致时连 GET 都会被判跨源失败；而 `pnpm --filter web dev` 绑的恰好是 `--host 127.0.0.1`。同一行为留给 S8 部署清单记一笔。
+- `apiClient` 的 `request<T>` 方法联合类型扩到 `PATCH | DELETE`；CSRF 头对所有写方法都要带（不只 POST）——**这一点容易漏**，`PATCH`/`DELETE` 与 `POST` 同级。实现里 CSRF 头**由方法推导**而不是逐个调用点传选项：一个需要"记得传"的开关，本身就是它会被漏掉的证据。
 - 删除 S2 的"写入迁移中"提示，恢复评论表单与删除按钮。
 - 移除 `lib/supabase.ts`、卸载 `@supabase/supabase-js`。
-- 编辑器改为写自建 API；`AdminArticleEditor` 与 `ArticleDetail` 的乐观本地保存（`localStorage` 兜底）**要重新审视**：静默本地覆盖会让用户以为已发布。至少要给出明确的成功/失败状态。
+- 编辑器改为写自建 API；`AdminArticleEditor` 与 `ArticleDetail` 的乐观本地保存（`localStorage` 兜底）**要重新审视**：静默本地覆盖会让用户以为已发布。至少要给出明确的成功/失败状态。（D-1 已把那条兜底整段删除：失败时红框显示后端给的 message、编辑框保持打开、已输入内容原样保留，不再写 `localStorage`。）
 
 ---
 

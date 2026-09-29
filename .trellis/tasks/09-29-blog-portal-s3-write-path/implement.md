@@ -159,13 +159,64 @@ Supabase 里的既有文章直接废弃，不导出、不核对、不搬。因�
 
 ## D · 前端切换并脱离 Supabase ← 里程碑
 
-- [ ] `apiClient`：`request<T>` 的方法联合扩到 `PATCH | DELETE`，CSRF 头覆盖所有写方法
-- [ ] `articlesApi` 的 `upsertArticle` 改调 API；新增 `createArticle` / `deleteArticle`
-- [ ] `commentsApi` 新增 `postComment` / `deleteComment`
-- [ ] 管理页加"导入 Markdown"：`<input type="file" accept=".md" multiple>` → `File.text()` → `POST /api/v1/articles/import`（C 阶段的端点）→ 逐篇列出成功/冲突；冲突行给一个"覆盖"按钮，点了才发 `PATCH`。**导入后一律是草稿，界面上别放"导入并发布"**——那是 R9 想守住的那条线，加个按钮就会有人用它
-- [ ] 撤销 S2 的只读降级：恢复评论表单与删除按钮；管理员可见删除他人评论
-- [ ] `AdminArticleEditor` / `ArticleDetail` 的 `localStorage` 兜底**重新审视**：静默本地"保存成功"会让人误以为已发布（design §5 点明）
-- [ ] 删 `apps/web/src/lib/supabase.ts`；`pnpm --filter web remove @supabase/supabase-js`
+**2026-09-29 拆成两刀**（拆的理由不是"太多"，是中间状态必须可用）：D-1 只把**传输层与写路径**换掉并断开 Supabase——做完它，"保存草稿 / 发布 / 改正文"这三件事在界面上都真的能用；D-2 才补**缺失的入口**（列表页、评论表单、导入按钮）。若不分刀，D 的中途会出现"发布功能彻底不可用"的窗口，而那是个倒退，因为 Supabase 时代是能发布的。
+
+### D-1 · 传输层与写路径（先做，做完即达里程碑）
+
+- [x] `apiClient`：`request<T>` 的方法联合扩到 `PATCH | DELETE`，**并补上请求体**——今天的 `request` 根本没有 body 参数，`apiPost(path)` 只能发空体（`authApi.ts:25` 的 logout 是它唯一的现有调用方，恰好不需要 body，所以这个洞一直没暴露）。CSRF 头必须覆盖全部四种写方法，不只 POST
+- [x] `articlesApi`：删掉 snake_case 的 `ArticleRecord` 与 `upsertArticle`，换成 `createArticle(CreateArticleInput)` / `updateArticle(slug, UpdateArticleInput)` / `deleteArticle(slug)` / `listAdminArticles()` / `getAdminArticle(slug)`。**两个现有调用点必须一起改**（`AdminArticleEditor.tsx:67`、`ArticleDetail.tsx:104`），否则 `check` 不过
+- [x] `commentsApi`：加 `postComment(slug, CreateCommentInput)` 与 `deleteComment(id)`。D-2 才接界面，但函数在这一刀就位，别让 D-2 顺手改传输层
+- [x] 编辑器：加载已有文章改走 `getAdminArticle`（草稿读得回来了，这是 D0 存在的意义），"保存"= 新建走 POST 落草稿 / 已存在走 PATCH 且**不带 status**；另给一个独立的**发布**按钮走 `PATCH {status:'published'}`。**不做"导入并发布"**这类合并动作
+- [x] `ArticleDetail`：删掉本地那个 `Article` interface（它写着 `coverImage: string` 非空，而 API 给的是 `string | null`；还多了一个契约里不存在的 `createdAt`），改用 `shared` 的类型；正文保存改走 `updateArticle(slug, {content})`；**`localStorage` 兜底改成失败时显式报错**
+- [x] 管理员在详情页看草稿时给一个"草稿"标记，否则他会以为文章丢了
+- [x] 删 `apps/web/src/lib/supabase.ts`（连带里面**已无人调用**的 `hasSupabaseCredentials`）；卸载 `@supabase/supabase-js`；清掉 `.env.example` 里 `VITE_SUPABASE_*` 的残留说明
+- [x] 附带（超出原清单，理由见下面执行结论）：`app.ts` 的 cors 补 `methods`，新增 `test/cors.test.ts`
+
+**D-1 执行结论（真跑过的账，含浏览器真点）**
+
+里程碑那两条 grep 实测：`grep -rniE "supabase" apps/web/src` → 无输出；`grep -c supabase apps/web/package.json` → `0`；连 `pnpm-lock.yaml` 也是 `0`。`App.tsx` / `Home.tsx` 里两处提到 Supabase 的**注释**也改了措辞——不是洁癖，是那条 grep 不分正文与注释，留着就归不了零。
+
+**挖出一个让整段 D 无法工作的真缺陷，以及它为什么活了四个阶段没被发现。** `@fastify/cors` 的默认 `methods` 是 `'GET,HEAD,POST'`（`index.js:11`；预检回的就是这个静态列表，`index.js:243`），而 `app.ts` 注册 cors 时只给了 `origin` 与 `credentials`。实测：
+
+```
+OPTIONS /api/v1/articles/x  Access-Control-Request-Method: PATCH
+  → access-control-allow-methods: GET,HEAD,POST      ← 浏览器据此拦掉发布
+```
+
+**当时 220 条后端测试全绿，而"发布"在浏览器里根本不可能工作。** 原因是 `app.inject()` 跑完整的请求生命周期，但这里没有浏览器、不做同源检查——**CORS 配置对测试是隐形的**。修法只有一行：`methods: ['GET','HEAD','POST','PATCH','DELETE']`，且只放 API 真路由的动词（`PUT` 不在内，允许用不上的动词等于白开门）。新增 `test/cors.test.ts` 把**预检响应本身**当被测对象，因为那是这个设置唯一可观察的地方。变异验证：把 `methods` 改回默认 → **恰好 2 红 3 绿**，红的正是 PATCH 与 DELETE 两条，绿的正是"GET/POST 仍被允许"那条对照（它防的是反向的错：把列表写成只剩 `PATCH,DELETE` 会让整站在浏览器里读不出内容）。
+
+**顺带修掉一个已存在的用户可见缺陷**：旧 `request` 对所有响应无条件 `response.json()`，而 `POST /auth/logout` 回 204 空体（`auth/routes.ts:232`），于是每次点"退出登录"都抛 `SyntaxError`、绕开 `catch (ApiError)`、被 `Header.tsx:26` 的 `console.error` 吞掉，表现成"点了没反应"。现在 204/205 直接返回而不解析 body——这条不修，阶段 B 的 `DELETE`（同样 204）在浏览器里一个都用不了。
+
+浏览器真点记录（api 3001 与 web 5175 都起着；会话 cookie 是 `httpOnly`，管理员态由本地签发的 15 分钟令牌注入，走的正是 `requireAuth` 读的那个 cookie，令牌用完即失效、未落盘）：
+
+| 验收点 | 实际看到的 |
+|---|---|
+| 匿名读走 API | 首页 6 篇已发布夹具，`draft-unpublished` 不在列表中 |
+| 匿名点草稿 | `/blog/draft-unpublished` → "文章未找到" |
+| 非管理员进后台 | "需要管理员权限"卡片 |
+| 存草稿 | `POST /articles` → **201**；"草稿已保存。公开列表还看不到它——点「发布」才会公开"；URL 转 `/admin/articles/<slug>/edit` |
+| **草稿读回来** | `GET /admin/articles/<slug>` → **200**，表单填满并显示"当前：草稿"（D0 那个洞在界面上闭合） |
+| 发布 | `PATCH` → **200**；跳 `/blog/...`；草稿标记消失；发布日期出现；正文里 `\path\to` 原样返回 |
+| 快速编辑只改正文 | `PATCH {content}` → 200；编辑框关闭、正文更新；`localStorage` 只剩 `theme` |
+| **失败可见**（把 api 停掉再存） | 编辑框**不关**；红框"保存失败：Failed to fetch"；**输入的文本完好保留**；无 `localStorage` 写入 |
+| DELETE | 走 API 删掉那篇测试文 → **204**；库回到 7 篇、无残留 |
+
+门禁（串行，含 cors 修复）：`-r lint` 0 · `-r check` 0 · `--filter api test` **19 文件 / 225 测试**（18/220 → +1 文件 +5 条）· `-r build` 0（web `✓ built in 58.83s`）。**计划里那条 `pnpm -r lint check build` 的合并写法在 pnpm 下不成立**——后两个词会被当参数传给第一个脚本，实际执行成 `eslint . check build` 并报 `No files matching the pattern "check"`，已按三条分别跑。
+
+**两处留给后面的观察，这一刀不动**：
+
+1. `Home.tsx:212` 与 `HeroCarousel.tsx:56` 仍是 `src={article.coverImage ?? ''}`，即把 null 喂进 `<img src="">`。`ArticleDetail` 里同类写法这一刀已改成"有值才渲染 `<img>`"，这两处不在范围内（7 篇夹具都没有封面图，所以表现为 alt 文本而不是破图）。归 D-2 或 F 一起收。
+2. **本地开发必须用 `http://localhost:5175` 打开，不能用 `127.0.0.1:5175`。** `@fastify/cors` 在 origin 是纯字符串时**回显配置值**而不比对请求方，所以页面源与配置串不一致时连 GET 都会被浏览器判失败——而 `pnpm --filter web dev` 绑的恰好是 `--host 127.0.0.1`，天然会踩。同一个回显行为还给 S8 记一笔：`Origin: http://evil.example` 也会拿到一个指向本站的 `allow-origin`（浏览器仍会拦，所以不构成漏洞），但"单源白名单"是靠回显实现的，不是靠校验。
+
+**里程碑标签 `s3-detached-from-supabase` 这一刀不打。** 名字对得上（前端已零 Supabase），但 §D 的验收块里"评论一条、删掉它"这两步要 D-2 才有界面可做，且列表页还没有——标签按计划打在 D 收尾。
+
+
+### D-2 · 补入口
+
+- [ ] `/admin/articles` 列表页 + 路由（S3-R22：标题、slug、状态、最后更新 + 每行编辑/发布/删除；不做搜索、批量、排序切换、预览）
+- [ ] 撤销 S2 的只读降级提示（`ArticleDetail.tsx:300`），恢复评论表单与删除按钮；管理员可见删除他人评论
+- [ ] 导入 Markdown 按钮：`<input type="file" accept=".md" multiple>` → `File.text()` → `POST /api/v1/articles/import` → 逐篇列出成功/冲突；冲突行给"覆盖"按钮，点了才发 `PATCH`
+- [ ] 删除文章入口（列表页那行即可，详情页不放）
 
 **验证**：
 
