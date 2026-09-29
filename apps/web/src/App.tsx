@@ -21,10 +21,10 @@ function App() {
     /**
      * One question to the API on mount: is there a session cookie?
      *
-     * Replaces the Supabase bootstrap, which had to exchange an OAuth code in the
-     * address bar and subscribe to auth events. The callback now completes on the
-     * API, so the SPA only ever reads the resulting session — nothing to parse out
-     * of the URL, and no client-side token storage.
+     * Replaces the old third-party auth bootstrap, which had to exchange an OAuth
+     * code in the address bar and subscribe to auth events. The callback now
+     * completes on the API, so the SPA only ever reads the resulting session —
+     * nothing to parse out of the URL, and no client-side token storage.
      */
     void refresh();
   }, [refresh]);

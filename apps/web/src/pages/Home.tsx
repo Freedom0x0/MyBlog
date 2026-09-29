@@ -55,7 +55,7 @@ export default function Home() {
     const fetchProjects = async () => {
       try {
         /**
-         * No auth header: the Supabase `provider_token` that used to be attached
+         * No auth header: the third-party `provider_token` that used to be attached
          * here was only present on the login round trip, so it was already gone on
          * the next page load — the anonymous 60 requests/hour limit applied almost
          * all the time and this only hid that.

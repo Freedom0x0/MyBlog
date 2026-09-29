@@ -22,7 +22,12 @@ export async function fetchMe(): Promise<SessionUser | null> {
 
 export async function logout(): Promise<void> {
   try {
-    await apiPost<{ ok: boolean }>('/auth/logout')
+    // `void`, because `/auth/logout` answers 204 with no body — the first caller
+    // of the transport layer that asked for a type the server never sends. It
+    // claimed `{ ok: boolean }` while the response was empty, which the old
+    // `request` tried to `JSON.parse` and which would have thrown a `SyntaxError`
+    // past every `catch (ApiError)`.
+    await apiPost<void>('/auth/logout')
   } catch (error) {
     // A session already ended server-side is a success from the user's point of
     // view; anything else should surface rather than look like a clean logout.

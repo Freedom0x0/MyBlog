@@ -7,37 +7,40 @@ import { ArrowLeft, Clock, Calendar, Tag, Edit, Save, X, MessageSquare } from 'l
 import { useAuthStore } from '../store/authStore';
 import MDEditor from '@uiw/react-md-editor';
 import rehypeSanitize from 'rehype-sanitize';
-import { getArticleBySlug, upsertArticle } from '../utils/articlesApi';
+import { getAdminArticle, getArticleBySlug, updateArticle } from '../utils/articlesApi';
 import { listComments } from '../utils/commentsApi';
 import { loginUrl } from '../utils/authApi';
-import type { CommentNode } from 'shared';
+import { describeApiError, ApiError } from '../lib/apiClient';
+import type { ArticleDetail as PublicArticle, ArticleAdmin, CommentNode } from 'shared';
 
 /**
- * View model for a rendered article, mapped from the snake_case `ArticleRecord`
- * the data layer returns. Declared here because this page is its only consumer.
+ * The page renders one of two shapes, and both are the API's, not a local copy.
  *
- * It used to come from `utils/mockData`, a module whose only other export was
- * the hardcoded fallback that showed invented content for unknown slugs — that
- * fallback is gone, and the type stays with the component that uses it.
+ * `ArticleDetail` is what the public endpoint answers; `ArticleAdmin` is what the
+ * admin endpoint answers for the same slug — the same fields plus `status` and
+ * `updatedAt`, with `publishedAt` nullable because a draft has none. Every reader
+ * gets the public shape, so `status` is narrowed with `in` where it is used.
+ *
+ * There used to be a third shape here: a hand-written `Article` interface that
+ * declared `coverImage: string` (non-null) and a `createdAt: string` no endpoint
+ * returns. The non-null cover is why the page passed `''` into `<img src>` and the
+ * extra field is why it read `record.publishedAt` through a rename. Both were
+ * silenced by the local type rather than handled; dropping it makes the API's
+ * nullability show up at the two places that have to deal with it.
  */
-interface Article {
-  title: string;
-  slug: string;
-  excerpt: string;
-  content: string;
-  category: string;
-  tags: string[];
-  coverImage: string;
-  readTime: number;
-  createdAt: string;
-}
 
 
 const ArticleDetail: React.FC = () => {
   const { slug } = useParams<{ slug: string }>();
-  const [article, setArticle] = useState<Article | null>(null);
+  const [article, setArticle] = useState<PublicArticle | ArticleAdmin | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editedContent, setEditedContent] = useState('');
+  const [loadingArticle, setLoadingArticle] = useState(true);
+  const [saving, setSaving] = useState(false);
+  /** Set when a write failed; the editor stays open with the text intact. */
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const { user, isAdmin } = useAuthStore();
   const [comments, setComments] = useState<CommentNode[]>([]);
@@ -47,31 +50,49 @@ const ArticleDetail: React.FC = () => {
     if (!slug) return;
 
     const load = async () => {
-      const record = await getArticleBySlug(slug);
+      setLoadingArticle(true);
+      setLoadError(null);
+      try {
+        /**
+         * An admin reads through the admin endpoint.
+         *
+         * The public one answers 404 for a draft to everyone — including the admin
+         * who wrote it — and "文章未找到" under a freshly saved draft reads like the
+         * article was lost. Same slug, same content, plus `status`, so the page can
+         * say 草稿 instead of guessing.
+         */
+        if (isAdmin) {
+          const adminView = await getAdminArticle(slug);
+          setArticle(adminView);
+          setEditedContent(adminView.content);
+          return;
+        }
 
-      if (!record) {
-        // Leave `article` null so the `!article` guard below renders
-        // "文章未找到". This path used to fall back to hardcoded mock data, so
-        // any unknown slug displayed invented content instead of saying no.
-        return;
+        const record = await getArticleBySlug(slug);
+
+        if (!record) {
+          // Leave `article` null so the `!article` guard below renders
+          // "文章未找到". This path used to fall back to hardcoded mock data, so
+          // any unknown slug displayed invented content instead of saying no.
+          return;
+        }
+
+        setArticle(record);
+        setEditedContent(record.content);
+      } catch (error) {
+        setArticle(null);
+        // A 404 here is "this slug is not an article you can read", which the
+        // `!article` guard below already says; anything else is a fault worth
+        // naming, because the same guard would otherwise blame the reader.
+        if (error instanceof ApiError && error.status === 404) return;
+        setLoadError(describeApiError(error, '文章加载失败，请重试。'));
+      } finally {
+        setLoadingArticle(false);
       }
-
-      setArticle({
-        title: record.title,
-        slug: record.slug,
-        excerpt: record.excerpt,
-        content: record.content,
-        category: record.category,
-        tags: record.tags || [],
-        coverImage: record.coverImage || '',
-        readTime: record.readTime || 5,
-        createdAt: record.publishedAt,
-      });
-      setEditedContent(record.content);
     };
 
     load();
-  }, [slug]);
+  }, [slug, isAdmin]);
 
   useEffect(() => {
     if (!slug) return;
@@ -97,54 +118,94 @@ const ArticleDetail: React.FC = () => {
     fetchComments();
   }, [slug]);
 
+  /**
+   * Quick edit saves the body through `PATCH /articles/:slug`.
+   *
+   * Only `content` travels: this is the field the panel edits, and the status rule
+   * says a plain content patch must not name one. Publishing is the editor's job.
+   */
   const handleSave = async () => {
     if (!article || !slug) return;
+    if (!isAdmin) return;
 
-    if (isAdmin) {
-      const saved = await upsertArticle({
-        slug,
-        title: article.title,
-        excerpt: article.excerpt,
-        content_md: editedContent,
-        category: article.category,
-        tags: article.tags,
-        cover_image: article.coverImage,
-        read_time: article.readTime,
-      });
-      if (saved) {
-        setArticle({
-          ...article,
-          content: saved.content_md,
-        });
-        setEditedContent(saved.content_md);
-        setIsEditing(false);
-        return;
-      }
+    setSaving(true);
+    setSaveError(null);
+    setSaveNotice(null);
+
+    try {
+      const saved = await updateArticle(slug, { content: editedContent });
+      // The server's row replaces the local one, so what the page shows after this
+      // is what is stored — including `status`, which is how a draft that just got
+      // its first publish elsewhere stays labelled here.
+      setArticle(saved);
+      setEditedContent(saved.content);
+      setIsEditing(false);
+      setSaveNotice(
+        saved.status === 'draft'
+          ? '正文已保存。这篇仍是草稿，公开访问看不到它。'
+          : '正文已保存。',
+      );
+    } catch (error) {
+      /**
+       * The failure is shown and nothing is applied.
+       *
+       * This block used to fall through to `setArticle({...article, content:
+       * editedContent})` plus `localStorage.setItem(...)`, so a rejected write left
+       * the reader looking at the new text and a stored note, while the row in the
+       * database still held the old one. There is no local fallback now: the text
+       * stays in the open editor, the API's own message says why, and retrying is
+       * possible without losing what was typed.
+       */
+      setSaveError(describeApiError(error, '保存失败，请重试。'));
+    } finally {
+      setSaving(false);
     }
-
-    setArticle({ ...article, content: editedContent });
-    localStorage.setItem(`article_${slug}`, editedContent);
-    setIsEditing(false);
   };
+
+  if (loadingArticle) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-background text-foreground">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
 
   if (!article) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-background text-foreground">
-        <h1 className="text-4xl font-bold mb-4">文章未找到</h1>
+        <h1 className="text-4xl font-bold mb-4">{loadError ? '文章读取失败' : '文章未找到'}</h1>
+        {loadError && <p className="mb-4 text-muted-foreground">{loadError}</p>}
         <Link to="/" className="text-primary hover:underline">返回首页</Link>
       </div>
     );
   }
 
+  /**
+   * `status` exists only on the admin shape, so the draft marker is a narrowing
+   * check rather than a field the public response is asked to invent. A reader
+   * who is not an admin can never reach a draft in the first place.
+   */
+  const isDraft = 'status' in article && article.status === 'draft';
+
   return (
     <div className="min-h-screen bg-background text-foreground selection:bg-primary/30">
       {/* Header Image */}
       <div className="relative h-[40vh] md:h-[60vh] w-full overflow-hidden">
-        <img
-          src={article.coverImage}
-          alt={article.title}
-          className="w-full h-full object-cover"
-        />
+        {article.coverImage ? (
+          <img
+            src={article.coverImage}
+            alt={article.title}
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          /**
+           * `coverImage` is nullable in the contract — the column is nullable and
+           * the API answers `null`, not `''`. The local type used to call it a
+           * `string`, so this page passed an empty `src` to `<img>` and got the
+           * browser's broken-image placeholder where a plain gradient belongs.
+           */
+          <div className="w-full h-full bg-gradient-to-br from-muted to-secondary" />
+        )}
         <div className="absolute inset-0 bg-gradient-to-t from-background via-background/50 to-transparent" />
         <div className="absolute bottom-0 left-0 right-0 max-w-4xl mx-auto px-4 pb-8">
           <Link
@@ -155,9 +216,22 @@ const ArticleDetail: React.FC = () => {
             返回首页
           </Link>
           <div className="flex items-center justify-between mb-6">
-            <h1 className="text-3xl md:text-5xl font-bold text-foreground">
-              {article.title}
-            </h1>
+            <div>
+              {isDraft && (
+                /**
+                 * The marker is the point of reading through the admin endpoint:
+                 * without it a draft looks identical to a published article, and an
+                 * admin who then shared the link would get "文章未找到" back and have
+                 * no way to know which half went wrong.
+                 */
+                <div className="inline-flex items-center mb-3 text-xs font-medium px-2 py-1 rounded-full bg-amber-500/20 text-amber-600 border border-amber-500/40">
+                  草稿 · 仅管理员可见
+                </div>
+              )}
+              <h1 className="text-3xl md:text-5xl font-bold text-foreground">
+                {article.title}
+              </h1>
+            </div>
             {isAdmin && !isEditing && (
               <div className="flex items-center gap-2">
                 <Link
@@ -180,15 +254,17 @@ const ArticleDetail: React.FC = () => {
               <div className="flex items-center space-x-2">
                 <button 
                   onClick={handleSave}
-                  className="flex items-center space-x-2 bg-green-500/20 text-green-500 px-4 py-2 rounded-md hover:bg-green-500/30 transition-colors"
+                  disabled={saving}
+                  className="flex items-center space-x-2 bg-green-500/20 text-green-500 px-4 py-2 rounded-md hover:bg-green-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Save className="w-4 h-4" />
-                  <span>保存</span>
+                  <span>{saving ? '保存中...' : '保存'}</span>
                 </button>
                 <button 
                   onClick={() => {
                     setIsEditing(false);
                     setEditedContent(article.content);
+                    setSaveError(null);
                   }}
                   className="flex items-center space-x-2 bg-red-500/20 text-red-500 px-4 py-2 rounded-md hover:bg-red-500/30 transition-colors"
                 >
@@ -201,7 +277,14 @@ const ArticleDetail: React.FC = () => {
           <div className="flex flex-wrap items-center gap-6 text-sm text-muted-foreground">
             <div className="flex items-center">
               <Calendar className="w-4 h-4 mr-2" />
-              {new Date(article.createdAt).toLocaleDateString('zh-CN')}
+              {article.publishedAt
+                ? new Date(article.publishedAt).toLocaleDateString('zh-CN')
+                : /**
+                   * The first place the nullable `publishedAt` is actually handled.
+                   * `new Date(null)` is 1970-01-01, and the old local type hid the
+                   * nullability by renaming the field instead.
+                   */
+                  '未发布'}
             </div>
             <div className="flex items-center">
               <Clock className="w-4 h-4 mr-2" />
@@ -217,6 +300,19 @@ const ArticleDetail: React.FC = () => {
 
       {/* Content */}
       <main className="max-w-4xl mx-auto px-4 py-12">
+        {saveError && (
+          <div className="mb-6 text-sm px-4 py-3 rounded-md bg-red-500/10 text-red-600 border border-red-500/30">
+            保存失败：{saveError}
+            <div className="mt-1 text-xs opacity-80">
+              下面的内容还没有写进服务器，改好后可以再点一次保存。
+            </div>
+          </div>
+        )}
+        {saveNotice && (
+          <div className="mb-6 text-sm px-4 py-3 rounded-md bg-green-500/10 text-green-600 border border-green-500/30">
+            {saveNotice}
+          </div>
+        )}
         {isEditing ? (
           <div className="bg-card p-4 rounded-xl border border-border" data-color-mode={document.documentElement.classList.contains('dark') ? 'dark' : 'light'}>
             <MDEditor
@@ -287,14 +383,14 @@ const ArticleDetail: React.FC = () => {
 
           {user ? (
             /**
-             * Posting is paused, and said so, rather than left to fail.
+             * Still read-only, and still said out loud rather than left to fail.
              *
-             * Reads now come from the portal API, but writes still go to Supabase,
-             * whose RLS requires a Supabase-issued user id. Sign-in no longer runs
-             * through Supabase at all, so any insert here would be rejected —
-             * silently, with a spinner and no explanation. The gap is the one the
-             * plan expects (stage S3 moves the write path), so the UI states it
-             * instead of pretending the feature works.
+             * The API now answers `POST /articles/:slug/comments` and
+             * `DELETE /comments/:id`, and `utils/commentsApi` has the two calls, but
+             * the input box and the delete buttons are not wired to them yet — that
+             * belongs with the admin list page in the next cut (implement.md D-2 /
+             * S3-R17). Deleting here would otherwise be a silent no-op, which is the
+             * failure this notice exists to prevent.
              */
             <div className="mb-10 bg-card/50 p-4 rounded-xl border border-border text-center text-muted-foreground">
               评论与发表的写入功能正在迁移到新的后端，暂时只读。已发表的评论可正常查看。
