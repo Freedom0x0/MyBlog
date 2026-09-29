@@ -50,11 +50,21 @@ pnpm --filter api test -- articles-write
 
 ## B · 评论写/删与权限
 
-- [ ] `modules/comments/repository.ts` 加 `insert`、`findAuthor`、`deleteById`
-- [ ] service：`parentId` 必须同文章；创建后返回**完整 CommentNode**（含 join 出的 author），前端不再自己拼
-- [ ] delete：作者或管理员；分别 204 / 403 / 404
-- [ ] 集成测试：作者删自己 ✓、删他人 403、管理员删任意 ✓、不存在 404、跨文章 parentId 400
-- [ ] **注释写清为什么评论用 403 而草稿文章用 404**（design §2），否则以后会被"统一"掉
+- [x] `modules/comments/repository.ts` 加 `insert`、`findById`、`deleteById`（计划里写的是 `findAuthor`，实现改成 `findById` 更好：一条语句同时定存在性(404)与作者(403)，省掉第二次读，也就没有两次读之间的 TOCTOU）
+- [x] service：`parentId` 必须同文章；创建后返回**完整 CommentNode**（含 join 出的 author），前端不再自己拼
+- [x] delete：作者或管理员；分别 204 / 403 / 404
+- [x] 集成测试：作者删自己 ✓、删他人 403、管理员删任意 ✓、不存在 404、跨文章 parentId 400
+- [x] **注释写清为什么评论用 403 而草稿文章用 404**（design §2），否则以后会被"统一"掉
+
+### B 执行结论（已跑过的真账，不是计划）
+
+- 全量闸：`pnpm -r test` **176 passed（153 基线 + 23 新增）**、`-r lint`、`-r check` 全绿。阶段 B 新增 23 条集成测试（`comments-write.test.ts`）。
+- **约束名经 `pg_constraint` 实测核对，非推断**：`repository.ts` catch 分支匹配的 `comments_parent_id_fkey`（→ comments）、`comments_user_id_fkey`（→ users）、`comments_article_id_fkey`（→ articles）三者与库中 `conname` 逐条对得上（这些 FK 都是内联 `references` 未显式命名，Postgres 自动命名即 `<表>_<列>_fkey`）。测试文件断言的 `comments_content_check`、`no_self_reply` 也核对无误。三条翻译分支里：`comments_article_id_fkey`（`article_missing`）在 repository 层用"删文章再插"确定性命中；`comments_user_id_fkey`（`author_missing`）经 HTTP"注销账号仍持有效 token"命中——`requireAuth` 只验签与 denylist、不查用户行是否存在，所以请求确实下到 insert，不是被 401 短路；`comments_parent_id_fkey` 无法被任何 fixture 调度（需要父行在本语句快照之后、自身 FK 检查之前消失），故**有意不测**，可观测的父问题（跨文章、不存在的 uuid）由 guard 走 `invalid_parent` 覆盖。
+- **`insert … select … where` 的形状判定：保留**。`$3::uuid is null or exists(...)` 中 parentId 传 JS `null` 时 `$3::uuid` 即 NULL、`NULL is null` 为真 → 无条件插入（无数根评论的既有测试即为证）。四个参数 `$1::uuid,$2::uuid,$3::uuid,$4::text` 全显式 cast，`insert…select` 无法像 `insert…values` 那样从目标列反推参数类型，漏一个就是 `could not determine data type of parameter $n`（代码注释已钉住这点）。新行从写 CTE 别名 `i` 读回而非 base 表 `comments`（数据修改型 CTE 的外层查询看到的是语句起始快照，join base 表会匹配不到自己刚插的行——注释记了这是实测结论）。更直白的替代都被否掉：`on conflict` 需要冲突目标且表达不了"父在另一篇文章"；`select … for update` 锁父行是把 guard 与写拆成两条语句、重新打开竞态窗口且更啰嗦。现写法的代价就是上面两条 cast/别名纪律，均已落在注释里。
+- **变异检验全部重做并还原复跑**（承接 A 立的"不信任何'应该会被抓到'"规矩）：去掉 `and p.article_id = $1::uuid` → `refuses a parentId on another article` 与 `an error response carries the envelope` 两条红；把管理员分支改成 `if (!isAuthor)` → `lets an administrator delete another user's comment` 红；`CreateCommentSchema.content` 改 `z.number()` → `tsc` 在 `schema.ts` 的 `CREATE_MATCHES_CONTRACT` 报 `Type 'true' is not assignable to type 'false'`（且下游 routes 连带报错）；两条结构守卫分别植入越层 SQL 验证：B 守卫在 `comments/service.ts` 植入 `insert into comments` 即红，A 守卫在 `articles/service.ts` 植入 `update articles` 即红——确认 B 守卫的 pattern 覆盖 insert/update/delete 三种写法、不止 insert。每次还原后 `pnpm -r test` 复跑回到 176 全绿。
+- **测试残留已核**：跑完后 `cw-%` 的 articles/users/comments 在库里均为 0。清理按 slug 删文章（cascade 带走评论）+ 按 `github_login like 'cw-%'` 扫用户，前缀与 A 的 `aw-%` 互不重叠（`aw_users_intact` 查询确认 A 用户未被 B 的清理误伤，反之亦然），无唯一键冲突。
+- **判定：`request.auth!` 两处非空断言保留**。唯一站得住的理由是：`onRequest: [requireAuth, requireCsrfHeader]` 里 `requireAuth` 已经 `request.auth = auth`，同一个路由声明块的 handler 必然看得到已赋值的上下文，而 `AuthContext` 在接口上是可选字段，`!` 只消解 nullability、不会把类型退化成 `any`。替代方案都不成立：让 `requireAuth` 返回上下文在 Fastify 的 `onRequest` 机制下无法注入 handler；为这两个端点专门收窄 handler 类型是过度工程；加一句 `if (auth === undefined) throw` 是给不可能的状态写错误处理。**规范并没有为生产代码的类型断言开绿灯**——复核初稿曾引 `conventions §4` 的 `as never` 那条作为依据，那是**测试**里替换 `Pool` 的代价，与这里无关，属误引；`eslint` 也没开 `no-non-null-assertion`，所以这条靠的是注释讲清前提，而不是靠某条许可。
+- **错误矩阵逐条对得上**（本轮补齐 design §6 缺失的一行）：400 `INVALID_COMMENT_PARENT`（跨文章/不存在父）、403 `FORBIDDEN`（他人评论非管理员）、400 `BAD_REQUEST`（空/超 4000，走同一 Zod 失败路径）、401 `UNAUTHORIZED`（无凭证、注销账号）均有断言 `code` 的真测试；评论不存在 → 404 `NOT_FOUND` 亦断 `code`。design §6 原表没给评论 404 的 code，已在该表补一行并加脚注说明"评论 404 用通用 `NOT_FOUND`、既不用 `ARTICLE_NOT_FOUND` 也不新造 `COMMENT_NOT_FOUND`"的理由（uuid 不可枚举、无存在性 secrets），防止以后被和草稿文章的 404 "统一"。
 
 ---
 

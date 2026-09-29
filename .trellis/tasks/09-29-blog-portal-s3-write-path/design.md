@@ -139,6 +139,7 @@ key 形态：uploads/<yyyy>/<mm>/<random32hex>.<ext-from-sniffed-type>
 | 创建时 slug 已存在 | 409 | `SLUG_CONFLICT` |
 | 目标 slug 不存在 | 404 | `ARTICLE_NOT_FOUND` |
 | `parentId` 属于另一篇文章 | 400 | `INVALID_COMMENT_PARENT` |
+| 评论 id 不存在（含被父线程 cascade 掉） | 404 | `NOT_FOUND` |
 | 删他人评论（非管理员） | 403 | `FORBIDDEN` |
 | 评论体空/超 4000 | 400 | `BAD_REQUEST` |
 | 上传声明类型与内容不符 | 415 | `UNSUPPORTED_MEDIA_TYPE` |
@@ -146,6 +147,8 @@ key 形态：uploads/<yyyy>/<mm>/<random32hex>.<ext-from-sniffed-type>
 | 未登录写任意资源 | 401 | `UNAUTHORIZED` |
 | 普通用户走管理端点 | 403 | `FORBIDDEN` |
 | 响应中出现 `23505` 等驱动码 | — | **测试断言绝不出现** |
+
+**评论 404 用通用 `NOT_FOUND`，不是 `ARTICLE_NOT_FOUND`，也不新增 `COMMENT_NOT_FOUND`**：`ARTICLE_NOT_FOUND` 承载的是"这个可猜的 slug 背后有没有一篇未发布的草稿"这个秘密（§2），评论 id 是不可枚举的 uuid，没有要藏的 secrets，所以状态码 404 本身就是完整答案，通用 code 足够。没有为评论单开 code，是因为没有调用方需要按它分支——将来若真出现该需求再开，别提前塞进词汇表。**别把它和 `ARTICLE_NOT_FOUND` "统一"**：两者的 code 不同恰恰是 §2 那套存在性探测理由的延续。
 
 ---
 
