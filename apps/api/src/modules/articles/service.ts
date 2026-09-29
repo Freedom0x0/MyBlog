@@ -1,7 +1,14 @@
-import { ERROR_CODES, type ArticleDetail, type ArticlePage } from 'shared'
+import {
+  ERROR_CODES,
+  type ArticleAdmin,
+  type ArticleDetail,
+  type ArticlePage,
+  type CreateArticleInput,
+  type UpdateArticleInput,
+} from 'shared'
 import { ApiError } from '../../errors.js'
 import { decodeCursor, encodeCursor, InvalidCursorError, type Cursor } from '../../lib/pagination.js'
-import type { ArticleRepository, ArticleRecord } from './repository.js'
+import type { ArticleRecord, ArticleRepository, UpdatePatch } from './repository.js'
 
 /**
  * Business rules. No `request`, no `reply`, no SQL — those are the boundaries this
@@ -92,6 +99,138 @@ export class ArticleService {
       publishedAt: found.publishedAt,
       content: found.contentMd,
     }
+  }
+
+  // ── admin write path ────────────────────────────────────────────────────────
+
+  /**
+   * Create a draft.
+   *
+   * There is no status argument: `CreateArticleInput` carries none and the
+   * repository seeds `'draft'`, so creating can never publish (S3-R0 /
+   * design §1.1). A slug already taken — including by a concurrent insert that
+   * won the race — surfaces as 409 SLUG_CONFLICT; the underlying `23505` was
+   * swallowed by `on conflict do nothing` and never reaches the response body.
+   */
+  async create(input: CreateArticleInput): Promise<ArticleAdmin> {
+    const created = await this.repository.insertDraft({
+      slug: input.slug,
+      title: input.title,
+      excerpt: input.excerpt,
+      contentMd: input.content,
+      category: input.category,
+      tags: input.tags,
+      coverImage: input.coverImage ?? null,
+      readTime: input.readTime ?? 5,
+    })
+
+    if (created === null) {
+      throw new ApiError(
+        ERROR_CODES.slugConflict,
+        `An article with slug '${input.slug}' already exists`,
+        409,
+      )
+    }
+
+    return toArticleAdmin(created)
+  }
+
+  /**
+   * Update, addressed by the article's current slug.
+   *
+   * This is the only entry point allowed to change `status`, and the timestamp
+   * rules follow design §1.1:
+   * - publishing never re-stamps an existing `published_at` — the first-publish
+   *   time is preserved across later edits and re-publishes, decided by the
+   *   repository's `coalesce` under the row lock, not by a racy read here;
+   * - moving back to draft (or archive) leaves `published_at` untouched, so we
+   *   never strand "was once published" information, and never violate the
+   *   `published_needs_timestamp` invariant (that constraint forbids
+   *   published-without-timestamp, never draft-with-stale-timestamp).
+   *
+   * The read up front exists for the 404 and the no-op return, not for the
+   * timestamp decision. The 404 here is deliberate for admins: a nonexistent
+   * slug answers the same way as for the public `findPublished`, so the write
+   * endpoint leaks nothing about drafts beyond what the caller (an admin) is
+   * already allowed to see through the admin read surface.
+   */
+  async update(slug: string, input: UpdateArticleInput): Promise<ArticleAdmin> {
+    const existing = await this.repository.findBySlug(slug)
+    if (existing === null) {
+      throw new ApiError(ERROR_CODES.articleNotFound, `No article with slug '${slug}'`, 404)
+    }
+
+    const patch: UpdatePatch = {
+      slug: input.slug,
+      title: input.title,
+      excerpt: input.excerpt,
+      contentMd: input.content,
+      category: input.category,
+      tags: input.tags,
+      coverImage: input.coverImage,
+      readTime: input.readTime,
+      status: input.status,
+    }
+
+    if (input.status === 'published') {
+      // A *candidate* timestamp, applied by the repository with `coalesce`: the
+      // row keeps its existing first-publish time even if a concurrent publish
+      // stamped it after the read above. Deciding "already stamped?" here from
+      // `existing.publishedAt` would re-introduce exactly the read-after-write
+      // race the publish pipeline avoids with `is distinct from` (design §3.1).
+      patch.publishedAt = new Date()
+    }
+
+    // Every known field absent: a no-op patch. Returning the stored record keeps
+    // `updated_at` from drifting on a request that changed nothing.
+    if (Object.values(patch).every((value) => value === undefined)) {
+      return toArticleAdmin(existing)
+    }
+
+    const result = await this.repository.updateBySlug(slug, patch)
+
+    if (result.kind === 'not_found') {
+      // Reachable only if the row vanished between the read and the update.
+      throw new ApiError(ERROR_CODES.articleNotFound, `No article with slug '${slug}'`, 404)
+    }
+
+    if (result.kind === 'conflict') {
+      throw new ApiError(
+        ERROR_CODES.slugConflict,
+        `Another article already owns the slug '${input.slug}'`,
+        409,
+      )
+    }
+
+    return toArticleAdmin(result.record)
+  }
+
+  /**
+   * Delete by slug. Cascade removes the article's comments (their FK is
+   * `on delete cascade`), which is the whole cleanup — there is no recycle bin
+   * (prd known-limitation 4).
+   */
+  async remove(slug: string): Promise<void> {
+    const deleted = await this.repository.deleteBySlug(slug)
+    if (!deleted) {
+      throw new ApiError(ERROR_CODES.articleNotFound, `No article with slug '${slug}'`, 404)
+    }
+  }
+}
+
+function toArticleAdmin(record: ArticleRecord): ArticleAdmin {
+  return {
+    slug: record.slug,
+    title: record.title,
+    excerpt: record.excerpt,
+    category: record.category,
+    tags: record.tags,
+    coverImage: record.coverImage,
+    readTime: record.readTime,
+    publishedAt: record.publishedAt,
+    content: record.contentMd,
+    status: record.status,
+    updatedAt: record.updatedAt,
   }
 }
 

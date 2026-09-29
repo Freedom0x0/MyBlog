@@ -48,6 +48,12 @@ export interface ArticleRecord {
   publishedAt: string | null
   status: string
   contentMd: string
+  /**
+   * Row modification time. Read back by the write path so the admin response can
+   * carry it; the public contract never shows it, and `getPublished` simply omits
+   * it from its explicit mapping — so widening the record here leaks nothing.
+   */
+  updatedAt: string
 }
 
 /**
@@ -63,7 +69,7 @@ const LIST_COLUMNS = `
 
 const DETAIL_COLUMNS = `
   id, slug, title, excerpt, category, tags, cover_image, read_time,
-  published_at, content_md, status
+  published_at, content_md, status, updated_at
 `
 
 export interface ListParams {
@@ -73,6 +79,45 @@ export interface ListParams {
   tag?: string
   category?: string
 }
+
+/** Fully-resolved values for a new draft; the service has already applied defaults. */
+export interface InsertDraftParams {
+  slug: string
+  title: string
+  excerpt: string
+  contentMd: string
+  category: string
+  tags: string[]
+  coverImage: string | null
+  readTime: number
+}
+
+/**
+ * A partial update. `undefined` means "leave this column alone"; only
+ * `publishedAt` is typed as `Date` because the service sets it only when a draft
+ * is first published and must hand Postgres a timestamp, not a lossy string.
+ */
+export interface UpdatePatch {
+  slug?: string
+  title?: string
+  excerpt?: string
+  contentMd?: string
+  category?: string
+  tags?: string[]
+  coverImage?: string | null
+  readTime?: number
+  status?: string
+  /**
+   * Candidate first-publish timestamp, applied with `coalesce` (see
+   * `updateBySlug`): it lands only where `published_at` is still null.
+   */
+  publishedAt?: Date
+}
+
+export type UpdateResult =
+  | { kind: 'updated'; record: ArticleRecord }
+  | { kind: 'not_found' }
+  | { kind: 'conflict' }
 
 export class ArticleRepository {
   constructor(private readonly pool: Pool) {}
@@ -142,7 +187,7 @@ export class ArticleRepository {
   }
 
   async findBySlug(slug: string): Promise<ArticleRecord | null> {
-    const result = await this.pool.query<ArticleRow & { content_md: string; status: string }>(
+    const result = await this.pool.query<ArticleRecordRow>(
       `select ${DETAIL_COLUMNS} from articles where slug = $1 limit 1`,
       [slug],
     )
@@ -150,20 +195,134 @@ export class ArticleRepository {
     const row = result.rows[0]
     if (row === undefined) return null
 
-    return {
-      id: row.id,
-      slug: row.slug,
-      title: row.title,
-      excerpt: row.excerpt,
-      category: row.category,
-      tags: row.tags,
-      coverImage: row.cover_image,
-      readTime: row.read_time,
-      // NULL is the normal case for a draft, not an error to be mapped away.
-      publishedAt: row.published_at === null ? null : row.published_at.toISOString(),
-      status: row.status,
-      contentMd: row.content_md,
+    return toArticleRecord(row)
+  }
+
+  /**
+   * Insert a new article as a draft.
+   *
+   * `status` is hard-wired to `'draft'` and `published_at` left to its null
+   * default — creation is not allowed to publish (design §1.1). The client's
+   * status is discarded upstream in the schema; hard-coding it here too means
+   * even a future caller that forgot to strip it cannot seed a published row.
+   *
+   * `on conflict (slug) do nothing` is the whole idempotency story (S3-R3): two
+   * concurrent creates for the same slug race at the unique index, exactly one
+   * inserts, the other returns zero rows and the service reads that as a
+   * conflict. A "check then insert" would leave a window where both saw a free
+   * slug and both wrote. Null return means "no row inserted"; it never leaks the
+   * `23505` because `do nothing` swallows the violation before the driver sees it.
+   */
+  async insertDraft(input: InsertDraftParams): Promise<ArticleRecord | null> {
+    const result = await this.pool.query<ArticleRecordRow>(
+      `insert into articles
+         (slug, title, excerpt, content_md, category, tags, cover_image, read_time, status)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, 'draft')
+       on conflict (slug) do nothing
+       returning ${DETAIL_COLUMNS}`,
+      [
+        input.slug,
+        input.title,
+        input.excerpt,
+        input.contentMd,
+        input.category,
+        input.tags,
+        input.coverImage,
+        input.readTime,
+      ],
+    )
+
+    const row = result.rows[0]
+    return row === undefined ? null : toArticleRecord(row)
+  }
+
+  /**
+   * Apply a partial update addressed by the current slug.
+   *
+   * The SET list is built only from fields the caller actually supplied, so an
+   * omitted field keeps its stored value rather than being nulled — the difference
+   * between a patch and a PUT. `updated_at = now()` is appended unconditionally:
+   * any accepted change bumps it. A slug rename is allowed here; it is safe
+   * precisely because comments key off `article_id`, not this text (D10).
+   *
+   * A rename onto an already-taken slug trips the unique index. Postgres gives
+   * UPDATE no `on conflict` escape, so the only race-free option is to catch the
+   * violation *here*, in the layer that owns SQL, and translate it to a domain
+   * signal before it climbs. The `23505` stops at this boundary; the service sees
+   * `'conflict'` and the client sees `SLUG_CONFLICT`.
+   *
+   * `published_at` is written through `coalesce`, not a plain assignment: the
+   * patch carries a *candidate* first-publish timestamp and the row keeps its
+   * existing one whenever it has one. Deciding "first publish?" by reading the
+   * row first and assigning conditionally would be a read-after-write race — two
+   * concurrent publishes would both see null and the later commit would overwrite
+   * the earlier first-publish time. Under the row lock, coalesce makes the
+   * "never re-stamp an existing first-publish time" rule (design §1.1) atomic
+   * rather than advisory.
+   */
+  async updateBySlug(slug: string, patch: UpdatePatch): Promise<UpdateResult> {
+    const sets: string[] = []
+    const values: unknown[] = []
+    const assign = (column: string, value: unknown): void => {
+      values.push(value)
+      sets.push(`${column} = $${values.length}`)
     }
+
+    if (patch.slug !== undefined) assign('slug', patch.slug)
+    if (patch.title !== undefined) assign('title', patch.title)
+    if (patch.excerpt !== undefined) assign('excerpt', patch.excerpt)
+    if (patch.contentMd !== undefined) assign('content_md', patch.contentMd)
+    if (patch.category !== undefined) assign('category', patch.category)
+    if (patch.tags !== undefined) assign('tags', patch.tags)
+    if (patch.coverImage !== undefined) assign('cover_image', patch.coverImage)
+    if (patch.readTime !== undefined) assign('read_time', patch.readTime)
+    if (patch.status !== undefined) assign('status', patch.status)
+    if (patch.publishedAt !== undefined) {
+      values.push(patch.publishedAt)
+      sets.push(`published_at = coalesce(published_at, $${values.length}::timestamptz)`)
+    }
+
+    sets.push('updated_at = now()')
+
+    values.push(slug)
+    const slugParam = `$${values.length}`
+
+    try {
+      const result = await this.pool.query<ArticleRecordRow>(
+        `update articles
+           set ${sets.join(',\n           ')}
+         where slug = ${slugParam}
+         returning ${DETAIL_COLUMNS}`,
+        values,
+      )
+
+      const row = result.rows[0]
+      if (row === undefined) return { kind: 'not_found' }
+
+      return { kind: 'updated', record: toArticleRecord(row) }
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') {
+        return { kind: 'conflict' }
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Delete by slug. Returns whether a row was actually removed.
+   *
+   * Hard delete (prd known-limitation 4): comments follow via their cascade FK.
+   * `false` is "nothing matched the slug", which the service renders as 404 — the
+   * same answer whether the article never existed or already left, so the endpoint
+   * never confirms a prior existence.
+   */
+  async deleteBySlug(slug: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `delete from articles where slug = $1`,
+      [slug],
+    )
+
+    return (result.rowCount ?? 0) > 0
   }
 
 }
@@ -180,6 +339,40 @@ interface ArticleRow {
   read_time: number
   published_at: Date | null
   cursor_key: string
+}
+
+/** A full article row, as `DETAIL_COLUMNS` returns it for reads and writes alike. */
+interface ArticleRecordRow {
+  id: string
+  slug: string
+  title: string
+  excerpt: string
+  category: string
+  tags: string[]
+  cover_image: string | null
+  read_time: number
+  published_at: Date | null
+  content_md: string
+  status: string
+  updated_at: Date
+}
+
+function toArticleRecord(row: ArticleRecordRow): ArticleRecord {
+  return {
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    excerpt: row.excerpt,
+    category: row.category,
+    tags: row.tags,
+    coverImage: row.cover_image,
+    readTime: row.read_time,
+    // NULL is the normal case for a draft, not an error to be mapped away.
+    publishedAt: row.published_at === null ? null : row.published_at.toISOString(),
+    status: row.status,
+    contentMd: row.content_md,
+    updatedAt: row.updated_at.toISOString(),
+  }
 }
 
 function toListRow(row: ArticleRow): ArticleListRow {

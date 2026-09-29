@@ -35,6 +35,20 @@ export const ERROR_CODES = {
   oauthExchangeFailed: 'OAUTH_EXCHANGE_FAILED',
   oauthProfileFailed: 'OAUTH_PROFILE_FAILED',
   csrfCheckFailed: 'CSRF_CHECK_FAILED',
+
+  /**
+   * A create or rename collided with an existing slug. Surfaced as 409 so a
+   * client can distinguish "pick another slug" from a generic conflict — and,
+   * critically, so the Postgres `23505` that actually fired stays in the
+   * database. The client branches on this, never on a SQLSTATE.
+   */
+  slugConflict: 'SLUG_CONFLICT',
+
+  /**
+   * A comment's `parentId` referenced a comment on a different article. Declared
+   * here so the write-path contract is complete; implemented in stage B.
+   */
+  invalidCommentParent: 'INVALID_COMMENT_PARENT',
 } as const
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES]
@@ -101,6 +115,70 @@ export interface ArticlePage {
   data: ArticleSummary[]
   next: { cursor: string } | null
   limit: number
+}
+
+export type ArticleStatus = 'draft' | 'published' | 'archived'
+
+/**
+ * An article as the admin write API returns it.
+ *
+ * Shaped like `ArticleDetail` but with two differences that exist because this
+ * view is allowed to see drafts:
+ * - `status` and `updatedAt` are exposed (the public contract hides both), and
+ * - `publishedAt` is nullable. A draft legitimately has none, and `ArticleDetail`
+ *   makes it required because the public endpoint only ever serves published
+ *   articles. Reusing the non-null shape here would force the write path to
+ *   fabricate a timestamp for every draft just to satisfy a serializer.
+ */
+export interface ArticleAdmin {
+  slug: string
+  title: string
+  excerpt: string
+  category: string
+  tags: string[]
+  coverImage: string | null
+  readTime: number
+  publishedAt: string | null
+  content: string
+  status: string
+  updatedAt: string
+}
+
+/**
+ * Body of `POST /api/v1/articles`.
+ *
+ * Deliberately carries no `status`: creation always lands a draft, so a client
+ * cannot publish by naming the status (design §1.1 — the anti-"accidental
+ * publish" rule). Unknown keys are stripped by the schema, so a `status` sent
+ * anyway is discarded rather than rejected.
+ */
+export interface CreateArticleInput {
+  slug: string
+  title: string
+  excerpt: string
+  content: string
+  category: string
+  tags: string[]
+  coverImage?: string | null
+  readTime?: number
+}
+
+/**
+ * Body of `PATCH /api/v1/articles/:slug`. Every field is optional — a patch
+ * carries only what changed. This is the *only* endpoint allowed to move `status`,
+ * and changing `slug` is permitted because comments hang off `article_id`, not the
+ * slug text (D10).
+ */
+export interface UpdateArticleInput {
+  slug?: string
+  title?: string
+  excerpt?: string
+  content?: string
+  category?: string
+  tags?: string[]
+  coverImage?: string | null
+  readTime?: number
+  status?: ArticleStatus
 }
 
 export interface CommentAuthor {
