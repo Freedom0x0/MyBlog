@@ -84,6 +84,21 @@ export async function buildApp({
   await app.register(cors, {
     origin: config.PORTAL_WEB_ORIGIN,
     /**
+     * `@fastify/cors` defaults to `GET,HEAD,POST` (its `index.js:11`, and the
+     * preflight answers with that static list verbatim). S3's write surface is
+     * `PATCH` and `DELETE`, so the default silently refuses the admin UI's own
+     * publish and delete buttons at preflight — silently, because `app.inject()`
+     * runs the request lifecycle but no browser same-origin check, so every
+     * existing test passed while the real browser could not make the call. The
+     * guard lives in `test/cors.test.ts`, which asserts on the preflight response
+     * itself; nothing else in this suite can see this setting.
+     *
+     * Only the verbs the API actually routes. `PUT` is absent on purpose: this
+     * surface uses PATCH, and an allow list that includes what we do not serve is
+     * a wider door for no reason.
+     */
+    methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE'],
+    /**
      * True from S2 onward because the session now travels in a cookie, and a
      * cross-origin fetch will not attach one unless the response says it may.
      *
