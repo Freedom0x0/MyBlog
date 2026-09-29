@@ -7,6 +7,8 @@ import type {
   ArticleSummary,
   AssertEquivalent,
   CreateArticleInput,
+  ImportArticlesRequest,
+  ImportArticlesResponse,
   UpdateArticleInput,
 } from 'shared'
 
@@ -141,4 +143,132 @@ export const UPDATE_MATCHES_CONTRACT: AssertEquivalent<
 export const STATUS_MATCHES_CONTRACT: AssertEquivalent<
   z.infer<typeof ArticleStatusSchema>,
   ArticleStatus
+> = true
+
+// ── Markdown import (S3-R7 ~ S3-R11, design §3) ───────────────────────────────
+
+/**
+ * Size ceilings, named here so the DTO, the route's `bodyLimit` and the tests all
+ * read the same numbers instead of three copies that drift.
+ *
+ * These do not defend against "an article too big to read" — markdown is plain
+ * text and a single file gets 128 KiB, which is absurdly generous for a blog post.
+ * They defend against a hand resting on the file picker: a few hundred files
+ * submitted as one request (design §3.2).
+ */
+export const IMPORT_MAX_FILES = 20
+export const IMPORT_MAX_MARKDOWN_BYTES = 128 * 1024
+export const IMPORT_MAX_TOTAL_MARKDOWN_BYTES = 2 * 1024 * 1024
+export const IMPORT_MAX_NAME_LENGTH = 255
+
+/**
+ * Route-scoped `bodyLimit` for the import endpoint — see `routes.ts`.
+ *
+ * The relationship to the DTO ceilings is the load-bearing part, not the exact
+ * numbers: Fastify enforces `bodyLimit` while collecting the body, *before* the
+ * Zod schema ever runs, so a request the DTO could have explained usefully must
+ * not be stopped by the framework first. Worst case the DTO allows
+ * IMPORT_MAX_TOTAL_MARKDOWN_BYTES (2 MiB) plus at most IMPORT_MAX_FILES names of
+ * IMPORT_MAX_NAME_LENGTH characters — about 2.1 MiB of *content*. The wire body can
+ * sit up to ~2x that (≈4.1 MiB) because JSON escapes inflate each affected byte
+ * (newlines, quotes, backslashes are all single-byte, so each grows to two), never
+ * shrinks — and 4.1 MiB still clears this 8 MiB ceiling: so oversized *content*
+ * always gets the Zod message ("markdown exceeds the 131072-byte limit"), and the
+ * framework's blunter 413 only fires on a body that is simply too big to be a real
+ * import.
+ *
+ * It is set per route and NOT raised globally (`app.ts` leaves Fastify's default
+ * 1 MiB alone): a global ceiling governs every endpoint, so lifting it would make
+ * the auth routes and the health checks start accepting large bodies too, for the
+ * benefit of exactly one caller.
+ */
+export const IMPORT_BODY_LIMIT_BYTES = 8 * 1024 * 1024
+
+/**
+ * `name` is a display name, and browsers hand us `File.name` — a basename with no
+ * directory part. Path separators are therefore refused rather than filtered:
+ * anything that looks like a path is either a bug in the caller or a probe, and
+ * the field's only job is to point at a file in a message. Control characters are
+ * refused for the same reason — they would end up echoed back into the admin page.
+ * Non-ASCII (中文 filenames) is fine, which is why this is a denylist and not a
+ * `[a-z0-9.-]` allowlist.
+ *
+ * Written as code-point comparisons rather than a character-class regex because
+ * `no-control-regex` (rightly) rejects /\u0000/ ranges: this way the ban says what
+ * it means and lint does not have to be told to look the other way.
+ */
+function hasPathSeparatorOrControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0
+    if (code < 0x20 || code === 0x7f) return true
+  }
+  return value.includes('/') || value.includes('\\')
+}
+
+/** Byte length as the server will store and count it, not UTF-16 code units. */
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, 'utf8')
+}
+
+export const ImportArticleFileSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(IMPORT_MAX_NAME_LENGTH)
+    .refine((value) => !hasPathSeparatorOrControlCharacter(value), {
+      message: 'name must be a bare file name, without path separators or control characters',
+    }),
+  markdown: z
+    .string()
+    .min(1)
+    .refine((value) => utf8Bytes(value) <= IMPORT_MAX_MARKDOWN_BYTES, {
+      message: `markdown exceeds the ${IMPORT_MAX_MARKDOWN_BYTES}-byte per-file limit`,
+    }),
+})
+
+export const ImportArticlesSchema = z.object({
+  files: z
+    .array(ImportArticleFileSchema)
+    .min(1, 'at least one markdown file is required')
+    .max(IMPORT_MAX_FILES, `a single import carries at most ${IMPORT_MAX_FILES} files`)
+    .refine((files) => files.reduce((total, file) => total + utf8Bytes(file.markdown), 0) <= IMPORT_MAX_TOTAL_MARKDOWN_BYTES, {
+      message: `the batch exceeds the ${IMPORT_MAX_TOTAL_MARKDOWN_BYTES}-byte total limit`,
+    }),
+})
+
+/**
+ * Per-file outcome. Discriminated on `kind` so the client narrows with
+ * `result.kind === 'created'` instead of probing for a field that may or may not
+ * be there.
+ *
+ * A conflict is a *member of the response*, not an error status (design §6): the
+ * batch was accepted and earlier files may already be drafts, so 409 for the whole
+ * request would be a lie about the half that succeeded.
+ */
+export const ImportArticleResultSchema = z.discriminatedUnion('kind', [
+  z.object({
+    name: z.string(),
+    kind: z.literal('created'),
+    article: ArticleAdminSchema,
+  }),
+  z.object({
+    name: z.string(),
+    kind: z.literal('conflict'),
+    slug: z.string(),
+    message: z.string(),
+  }),
+])
+
+export const ImportArticlesResponseSchema = z.object({
+  results: z.array(ImportArticleResultSchema),
+})
+
+export const IMPORT_REQUEST_MATCHES_CONTRACT: AssertEquivalent<
+  z.infer<typeof ImportArticlesSchema>,
+  ImportArticlesRequest
+> = true
+
+export const IMPORT_RESPONSE_MATCHES_CONTRACT: AssertEquivalent<
+  z.infer<typeof ImportArticlesResponseSchema>,
+  ImportArticlesResponse
 > = true

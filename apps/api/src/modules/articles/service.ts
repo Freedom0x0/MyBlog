@@ -4,10 +4,15 @@ import {
   type ArticleDetail,
   type ArticlePage,
   type CreateArticleInput,
+  type ImportArticleFile,
+  type ImportArticleResult,
+  type ImportArticlesResponse,
   type UpdateArticleInput,
 } from 'shared'
 import { ApiError } from '../../errors.js'
+import { FixtureError, parseFixture } from '../../db/frontmatter.js'
 import { decodeCursor, encodeCursor, InvalidCursorError, type Cursor } from '../../lib/pagination.js'
+import { CreateArticleSchema } from './schema.js'
 import type { ArticleRecord, ArticleRepository, UpdatePatch } from './repository.js'
 
 /**
@@ -176,8 +181,9 @@ export class ArticleService {
       // A *candidate* timestamp, applied by the repository with `coalesce`: the
       // row keeps its existing first-publish time even if a concurrent publish
       // stamped it after the read above. Deciding "already stamped?" here from
-      // `existing.publishedAt` would re-introduce exactly the read-after-write
-      // race the publish pipeline avoids with `is distinct from` (design §3.1).
+      // `existing.publishedAt` would be the read-after-write race every write
+      // path in this module avoids by letting one statement under the row lock
+      // answer the question.
       patch.publishedAt = new Date()
     }
 
@@ -216,6 +222,126 @@ export class ArticleService {
       throw new ApiError(ERROR_CODES.articleNotFound, `No article with slug '${slug}'`, 404)
     }
   }
+
+  /**
+   * Import markdown files as drafts (S3-R7 ~ S3-R11, design §3).
+   *
+   * Two phases, in this order, because the order *is* the requirement. Phase 1
+   * parses every file and throws on the first one that fails, so a batch carrying
+   * one malformed file writes zero rows (S3-R11) — there is no half-imported batch
+   * to notice and clean up. Phase 2 then writes sequentially and reports per file,
+   * and does NOT roll back the batch when one article conflicts: "3 of 5 landed,
+   * here are the two that did not and why" beats "the batch failed, go guess which
+   * file broke it" (design §3.2). Each `create()` is its own statement and
+   * therefore already atomic, so no partial row is possible either.
+   *
+   * Everything that actually decides what lands in the table is `create()`'s: this
+   * method adds no write path of its own. That is the point of parsing server-side
+   * (design §3) — one door, one set of rules behind it.
+   */
+  async importAll(files: ImportArticleFile[]): Promise<ImportArticlesResponse> {
+    // Phase 1: parse + map, all or nothing.
+    const prepared = files.map((file) => toDraftInput(file))
+
+    // Phase 2: write, collecting one result per file in the order they arrived.
+    const results: ImportArticleResult[] = []
+
+    for (const { name, input } of prepared) {
+      try {
+        results.push({ name, kind: 'created', article: await this.create(input) })
+      } catch (error) {
+        // Only a slug conflict becomes a per-file result. Anything else — a lost
+        // permission check, the database being down, a constraint nobody expected
+        // — is rethrown so it reaches the error handler and a 4xx/5xx that says so.
+        // Catching `Error` here would dress an infrastructure failure up as a
+        // business outcome and report 200 for a request the server could not serve.
+        if (error instanceof ApiError && error.code === ERROR_CODES.slugConflict) {
+          results.push({ name, kind: 'conflict', slug: input.slug, message: error.message })
+          continue
+        }
+        throw error
+      }
+    }
+
+    return { results }
+  }
+}
+
+/**
+ * A file that has become a create-and-store draft, name kept for the report.
+ */
+interface PreparedDraft {
+  name: string
+  input: CreateArticleInput
+}
+
+/**
+ * Parse one imported file into a `CreateArticleInput`, or throw a 400 that names it.
+ *
+ * `parseFixture` is reused rather than reimplemented (S3-R8): it is the same
+ * parser the seed uses, so the front-matter format has one definition — including
+ * the refusals (YAML indentation, comments, unknown keys, duplicate keys, the
+ * `tags: [a, b]` form). A second, more forgiving parser in the import path would
+ * accept exactly the files the seed rejects and then be blamed for the difference.
+ *
+ * It lives under `src/db/`, which makes an import from a service look like a
+ * layering break. It is not one: the rule in architecture §1 is that a service
+ * must not speak HTTP or SQL, and this is a pure text → object function with no
+ * pool, no request and no driver. Moving it out of `db/` would drag `seed.ts` and
+ * `frontmatter.test.ts` along for a cosmetic win, so it stays where it is.
+ *
+ * `fixture.status` and `fixture.publishedAt` are deliberately dropped here. An
+ * import always lands a draft (S3-R9), and no new code is needed to guarantee
+ * that: `CreateArticleInput` has no `status` field and the repository hard-wires
+ * `'draft'`, so a published-looking file has nowhere to put it. `status` still
+ * participates in validation — it is a required key and its value is checked, so
+ * `status: published` is accepted *as text* and then ignored, never honoured.
+ */
+function toDraftInput(file: ImportArticleFile): PreparedDraft {
+  let fixture
+  try {
+    // The file name is passed as the parse source so the parser's own messages
+    // say which file it is talking about. It is *only* ever an identifier: it
+    // never reaches SQL (the repository binds values, builds no statements from
+    // them) and never reaches a filesystem path (nothing here touches disk).
+    fixture = parseFixture(file.markdown, file.name)
+  } catch (error) {
+    if (error instanceof FixtureError) {
+      // The parser's message already starts with the file name. Forwarding the
+      // exception itself would hand the client a stack; this is a plain 400 in the
+      // shared envelope with `code: BAD_REQUEST` (design §6).
+      throw new ApiError(ERROR_CODES.badRequest, `Cannot import ${error.message}`, 400)
+    }
+    throw error
+  }
+
+  const candidate: CreateArticleInput = {
+    slug: fixture.slug,
+    title: fixture.title,
+    excerpt: fixture.excerpt,
+    content: fixture.body,
+    category: fixture.category,
+    tags: fixture.tags,
+    coverImage: fixture.coverImage,
+    readTime: fixture.readTime,
+  }
+
+  // Cross-check the mapped draft against `CreateArticleSchema` — the *same* DTO
+  // `POST /api/v1/articles` validates with. Without it, import would be a side door
+  // around those field bounds: the front-matter parser checks the *shape* of the
+  // block (keys, status vocabulary, the tag list form) but not the article's field
+  // sizes, so `excerpt:` or a body-less file parses fine and would be written as-is
+  // while the create endpoint refuses it. Reusing the existing DTO keeps the bounds
+  // in one place instead of inventing a second set here.
+  const validated = CreateArticleSchema.safeParse(candidate)
+  if (!validated.success) {
+    const reasons = validated.error.issues
+      .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+      .join('; ')
+    throw new ApiError(ERROR_CODES.badRequest, `Cannot import ${file.name}: ${reasons}`, 400)
+  }
+
+  return { name: file.name, input: validated.data }
 }
 
 function toArticleAdmin(record: ArticleRecord): ArticleAdmin {

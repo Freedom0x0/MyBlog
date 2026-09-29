@@ -6,6 +6,9 @@ import {
   ArticleDetailSchema,
   ArticlePageSchema,
   CreateArticleSchema,
+  IMPORT_BODY_LIMIT_BYTES,
+  ImportArticlesResponseSchema,
+  ImportArticlesSchema,
   ListQuerySchema,
   SlugParamsSchema,
   UpdateArticleSchema,
@@ -67,6 +70,31 @@ export const articleRoutes: FastifyPluginAsyncZod = async (app) => {
       },
     },
     async (request, reply) => reply.code(201).send(await service.create(request.body)),
+  )
+
+  /**
+   * Markdown import, same guard pair and same order as the other writes.
+   *
+   * Answers **200** for a batch that was accepted even when some of its files
+   * conflicted (design §6): the HTTP status describes the request, and a 409 here
+   * would contradict the drafts this call did create. Per-file truth lives in
+   * `results`, where a conflict is data with a name attached, not a status code.
+   *
+   * `bodyLimit` is a route-level option, so only this endpoint accepts the larger
+   * body — see `IMPORT_BODY_LIMIT_BYTES` in schema.ts for why it must stay well
+   * above the DTO's ceilings, and why the DTO is the one that should be answering.
+   */
+  app.post(
+    '/api/v1/articles/import',
+    {
+      onRequest: [requireAdmin, requireCsrfHeader],
+      bodyLimit: IMPORT_BODY_LIMIT_BYTES,
+      schema: {
+        body: ImportArticlesSchema,
+        response: { 200: ImportArticlesResponseSchema },
+      },
+    },
+    async (request) => service.importAll(request.body.files),
   )
 
   app.patch(

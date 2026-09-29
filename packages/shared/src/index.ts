@@ -183,6 +183,72 @@ export interface UpdateArticleInput {
   status?: ArticleStatus
 }
 
+/**
+ * ── Markdown import (`POST /api/v1/articles/import`) ──────────────────────────
+ *
+ * One entry per file the person picked in the admin page. The *raw* markdown text
+ * travels, not parsed fields: parsing happens server-side so there is exactly one
+ * parser and exactly one write path (S3-R8 / design §3). A client-side parser
+ * would be a second validator that a modified request body walks straight around.
+ */
+export interface ImportArticleFile {
+  /**
+   * The browser's `File.name`, used only to point at the offending file in a
+   * result or error message. Never a path and never in SQL — a display name is
+   * attacker-controlled text, and the value the client sent back is echoed to it
+   * for identification and nothing else.
+   */
+  name: string
+  markdown: string
+}
+
+export interface ImportArticlesRequest {
+  files: ImportArticleFile[]
+}
+
+/**
+ * A file that became a draft. `article` is the same shape `POST /api/v1/articles`
+ * returns, so the admin page can render one row type for both paths — and its
+ * `status` is the server's answer ("draft"), which is exactly how S3-R9 gets
+ * proved to the person importing rather than asserted in prose.
+ */
+export interface ImportArticleCreatedResult {
+  name: string
+  kind: 'created'
+  article: ArticleAdmin
+}
+
+/**
+ * A file whose slug was already taken. Reported per file, inside an otherwise
+ * 200 response (design §6): the *batch* was accepted, so the HTTP status must not
+ * claim it wasn't — while earlier files in the same batch may already be written.
+ * The client asks the person "overwrite?" and only then sends a `PATCH`
+ * (S3-R10). No new error code is opened for this: it is data, not a failure.
+ */
+export interface ImportArticleConflictResult {
+  name: string
+  kind: 'conflict'
+  /** The slug that collided — the thing the follow-up `PATCH` addresses. */
+  slug: string
+  /** Human-readable reason, safe to show as-is. */
+  message: string
+}
+
+export type ImportArticleResult = ImportArticleCreatedResult | ImportArticleConflictResult
+
+/**
+ * Per-file results, in the order the files arrived, so the page can pair them
+ * back up by position as well as by `name`.
+ *
+ * Wrapped in an object rather than returned as a bare array because no other
+ * endpoint in this API answers with a top-level array (`ArticlePage`,
+ * `CommentList`, `TagList` all wrap) and a wrapper is where a later field — a
+ * count, a warning — can appear without changing the response's type.
+ */
+export interface ImportArticlesResponse {
+  results: ImportArticleResult[]
+}
+
 export interface CommentAuthor {
   /**
    * The author's user id.
