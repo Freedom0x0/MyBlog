@@ -16,12 +16,12 @@
 
 ## A · 文章写 API
 
-- [ ] `shared` 加 `ArticleAdmin`、`CreateArticleInput`、`UpdateArticleInput` 接口；api 侧 Zod schema + **编译期漂移守卫**（沿用 `*_MATCHES_CONTRACT` 模式）
-- [ ] `modules/articles/repository.ts` 加 `insertDraft`（`on conflict do nothing`）、`updateBySlug`、`deleteBySlug`
-- [ ] `service.ts` 加创建/更新/删除 + 状态流转规则；**只有 `update` 能改 status**，创建恒 `draft`
-- [ ] `routes.ts` 三个端点挂 `requireAdmin`
-- [ ] `PATCH` 的 CSRF 头要求（**别只给 POST 加**，design §5 点过这个坑）
-- [ ] 错误码新增 `SLUG_CONFLICT`、`INVALID_COMMENT_PARENT`
+- [x] `shared` 加 `ArticleAdmin`、`CreateArticleInput`、`UpdateArticleInput` 接口；api 侧 Zod schema + **编译期漂移守卫**（沿用 `*_MATCHES_CONTRACT` 模式）
+- [x] `modules/articles/repository.ts` 加 `insertDraft`（`on conflict do nothing`）、`updateBySlug`、`deleteBySlug`
+- [x] `service.ts` 加创建/更新/删除 + 状态流转规则；**只有 `update` 能改 status**，创建恒 `draft`
+- [x] `routes.ts` 三个端点挂 `requireAdmin`
+- [x] `PATCH` 的 CSRF 头要求（**别只给 POST 加**，design §5 点过这个坑）
+- [x] 错误码新增 `SLUG_CONFLICT`、`INVALID_COMMENT_PARENT`
 
 **验证（每条都要真跑）**：
 
@@ -32,7 +32,17 @@ pnpm --filter api test -- articles-write
 # 并发同 slug 创建：恰好一个 201，其余 409，且响应不含 23505
 ```
 
-- [ ] **反向测试**：无凭证 401、普通用户 403（这条同时补上 S2 记录的"requireAdmin 端到端 403 缺覆盖"缺口）
+- [x] **反向测试**：无凭证 401、普通用户 403（这条同时补上 S2 记录的"requireAdmin 端到端 403 缺覆盖"缺口）
+
+### A 执行结论（已跑过的真账，不是计划）
+
+- 全量闸：`pnpm -r test` **153 passed（147 基线 + 6 新增）**、`-r lint`、`-r check` 全绿。阶段 A 共 22 条集成测试。
+- **复核抓到一个真实缺陷**：首发时间戳原本由 service「先读 `existing.publishedAt` 再决定要不要写」判定，两个并发首发都会读到 null，后提交者覆盖先提交者的首发时间。改法：service 只递交**候选**时间戳，repository 用 `published_at = coalesce(published_at, $n::timestamptz)` 在行锁内决定——与 §3.1 用 `is distinct from` 把比较下推进 SQL 是同一个理由。
+  **推广到 B–G**：任何「先查再分支写」都是读后写竞态。判断条件属于 SQL 的（是否为空、是否变化、是否冲突），一律下推，不要在应用层读一遍再决定。
+- 新增并发**改 slug**测试（S3-R3 的延伸，原计划漏了）：恰好一个 200、一个 409 `SLUG_CONFLICT`，且败方仍持有原 slug。
+- 变异检验做过两次：把 schema 字段改错类型 → 两个 `*_MATCHES_CONTRACT` 如期编译失败；回退 coalesce 修复 → repository 层的固定时间戳测试确定性失败。**注意**：HTTP 层的并发首发测试在缺陷代码上会因为同一毫秒而侥幸通过，所以它只是哨兵，确定性证明放在 repository 层用固定时间戳的那条——写并发测试时别把这种测试当证据。
+- 环境事实：本机 `pnpm` shim 指向不存在的 `…\.tools\pnpm\12.4.1\`（真实目录带 `_tmp_102640_0` 后缀，疑似安装中断）。本轮所有验证经 `node C:/Users/15532/AppData/Local/pnpm/.tools/pnpm/12.4.1_tmp_102640_0/node_modules/pnpm/bin/pnpm.mjs` 执行。**属环境问题，与本轮代码无关，待单独修复**。
+- `pnpm --filter api test -- articles-write` 的**位置参数在本项目 vitest 配置下不起过滤作用**，实际跑的是 api 全量（15 文件）。上面记录的数字按真实执行情况写的，没有按"只跑了 articles-write"记账。
 
 > **A 完成即打 `s3-a`**。若后续做不完，A+B 已经是"写路径可用"的最小闭环。
 
