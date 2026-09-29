@@ -24,6 +24,8 @@ DELETE /api/v1/articles/:slug      requireAdmin   → 204 | 404
 POST   /api/v1/articles/:slug/comments     requireAuth → 201 CommentNode | 404
 DELETE /api/v1/comments/:id        requireAuth    → 204 | 403 | 404
 POST   /api/v1/uploads             requireAdmin   → 200 {uploadUrl, publicUrl, key}
+GET    /api/v1/admin/articles      requireAdmin   → 200 AdminArticlePage（含草稿，无正文）
+GET    /api/v1/admin/articles/:slug requireAdmin  → 200 ArticleAdmin | 404
 ```
 
 `ArticleAdmin` = `ArticleDetail` 加 `status`、`updatedAt`（管理视图需要看见草稿；**公开端点永不返回 draft**，沿用 S1 的 `findPublished`）。
@@ -47,6 +49,25 @@ POST   /api/v1/uploads             requireAdmin   → 200 {uploadUrl, publicUrl,
 
 `PATCH` 允许改 slug；评论挂在 `article_id` 上，因此改 slug 不影响可见性。
 **测试**：发布 → 评论 → 改 slug → 用新 slug 查详情与评论，两者都必须非空。**这条测试的价值在于它会失败**：老结构用 `article_slug` 文本关联，同样的改动会静默丢掉所有评论，且没有任何约束报错。
+
+---
+
+### 1.4 管理员读端点（S3-R20 ~ R22，2026-09-29 补）
+
+A/B/C 三段建的是写路径，读路径全在 S1 且只服务已发布内容。于是草稿能创建、能改、能删，**却读不回来**：`AdminArticleEditor` 加载已有文章用的是公开详情端点，草稿一律 404，页面于是显示成一张空白新建表单。补两条读端点，都不与公开读共用 SQL：
+
+| 端点 | 守卫 | 返回 |
+|---|---|---|
+| `GET /api/v1/admin/articles` | `requireAdmin` | `AdminArticlePage`：所有状态、按 `updated_at desc, id desc`、**不含正文** |
+| `GET /api/v1/admin/articles/:slug` | `requireAdmin` | `ArticleAdmin`：含正文与 `status`，草稿可读 |
+
+三条设计决定：
+
+- **顺序按"最近改动"，不按发布时间。** 管理员要找回刚存的那篇草稿，而草稿的 `published_at` 是 null——若沿用公开列表的 `published_at desc nulls last`，所有草稿会被挤到最后一堆、彼此按 uuid 随机排列，等于没有顺序。
+- **不给公开端点加 `?includeDraft`。** 那等于把"草稿对谁可见"交给请求方开关；可见性必须是**授权**判断，只能挂在新端点的 `requireAdmin` 上。公开端点继续只认 `findPublished`。
+- **暂时不为此加新索引。** `articles_list_keyset` 服务的是公开顺序，`updated_at` 上没有任何索引，所以管理员列表目前是一次顺序扫描加排序。个人博客的文章数量在几十到几百的量级，这个成本可以接受；**去除条件**：当列表页明显变慢时加 `create index articles_admin_list_keyset on articles (updated_at desc, id desc)`，并且按 conventions §9 的要求——`ORDER BY` 与索引表达式逐字对齐，且在几千行的临时库里用 `EXPLAIN` 证明它真被用上，而不是在 7 行表上看一个"看着对"的计划。
+
+**`updatedAt` 的可空性**：`ArticleAdmin.updatedAt` 目前是必填 `string`，而管理列表要把每行的"最后更新"显示出来。这条不阻塞（写路径已经把它读进 `ArticleRecord`），但要求 `adminList` 的投影显式包含 `to_char(updated_at ...)`，别用 `published_at` 的游标键凑数。
 
 ---
 

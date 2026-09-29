@@ -123,6 +123,40 @@ Supabase 里的既有文章直接废弃，不导出、不核对、不搬。因�
 
 ---
 
+## D0 · 管理员读文章（S3-R20 ~ R22，D 的前置）
+
+计划原稿的 A~G 里没有管理员读端点，导致草稿读不回来（理由见 prd 该段与 design §1.4）。这一段是补的，先做后端两条读端点，列表页随 D 一起做（它要用的写端点、导入按钮都在 D 里接）。
+
+- [x] `packages/shared`：`AdminArticleSummary`（= `ArticleAdmin` 去掉 `content`）、`AdminArticlePage`（`data`/`next`/`limit`，与 `ArticlePage` 同构）
+- [x] `articles/repository.ts`：`adminList({limit, cursor, status?})` —— **新写一条 SQL**，不要复用 `listPublished`：那条的名字就承诺了 `status = 'published'`，让它返回草稿是在撒谎。顺序 `updated_at desc, id desc`，游标键取 `updated_at` 的全精度文本（同 `LIST_COLUMNS` 对 `published_at` 的处理，理由也相同：给客户端的是毫秒，游标必须是微秒）
+- [x] `articles/repository.ts`：`findBySlug` **已经是**"返回查到的任何东西、由 service 决定可见性"，所以 `GET /admin/articles/:slug` 直接复用它，不需要第三条 SQL
+- [x] `articles/service.ts`：`listForAdmin(...)` 与 `getForAdmin(slug)`。后者查不到时 404 `ARTICLE_NOT_FOUND`——与公开路径同一个 code 同一个语义，管理员不需要从这里分辨"存在但是草稿"
+- [x] `articles/routes.ts`：两条 `app.get`，`onRequest: [requireAdmin]`；**不挂 `requireCsrfHeader`**（那是写操作的要求，GET 带它只会让浏览器预检与将来的直链多一层无意义失败）
+- [x] `articles/schema.ts`：`AdminArticleSummarySchema`/`AdminArticlePageSchema` + 两条 exported 漂移守卫，以及 `AdminListQuerySchema`（`limit` 上限照公开列表，`status` 用枚举）。（我原先在这条后面写的"非法值 400 而不是落到 SQL"理由是**错的**，实现时纠正：非法 `status` 是 WHERE 里的一个比较值，永远撞不到写入侧的 `check` 约束，真实后果是查出空集、返回 200 + `data: []`——一个骗人的"你没有归档文章"。400 这个行为保留，理由换成这个。）
+
+**验证**（写成 `apps/api/src/test/admin-articles.test.ts`）：
+
+- 库里同时有草稿与已发布时，管理员列表**两样都有**且带 `status`；公开列表仍只有已发布那一条（同一次运行里两个端点都查，才算对照）
+- 草稿经 `GET /admin/articles/:slug` 返回 200 且 `status: 'draft'`、`publishedAt: null`；同一个 slug 走公开端点仍 404
+- 顺序正确：改一篇旧的使其 `updated_at` 最新，它必须排到第一页第一行
+- 游标翻页不重不漏：造 3 篇、`limit=2` 走两页，slug 集合等于 3 且无重复
+- 反向权限：无凭证 401、已登录但非管理员 403；**非管理员即使带 CSRF 头也是 403**（证明守卫顺序没被人写反）
+- `status` 传非法值 → 400 `BAD_REQUEST`，且响应里不含 `23514`/`check_constraint`
+- 结构守卫沿用 A/B 那条：`select ... from articles` 的新增语句只出现在 `repository.ts`
+
+**D0 执行结论（已跑过的真账）**
+
+- 实际发出的 SQL 是被**包 `pool.query` 抓下来**的，不是照着源码想象的：无过滤时 `where true`，带游标时 `where true and (updated_at, id) < ($1::timestamptz, $2::uuid)`，顺序一律 `order by updated_at desc, id desc limit $n`。`true` 作为基条件是为了让"没有任何过滤条件"这个**默认情形**（管理员列表本来就要看全部状态）拼出来仍是合法 SQL。
+- `updated_at` 在 `0001_portal_schema_v2.up.sql:40` 是 `not null`，所以顺序里不需要 `nulls` 修饰——这一点与公开列表相反，那边的 `published_at desc nulls last` 是逐字对齐索引表达式写出来的。
+- **没有加新索引**，实现者独立同意 design §1.4 的判断并给了实测：当前计划是 `Limit → Sort → Seq Scan`（7 行），而 conventions §9 明说小表两种写法都会给出"看着对"的计划，所以这个实测**不构成**"不需要索引"的证据，它只是说明现阶段无从判断。它同时确认新写的 `ORDER BY` 已经是未来 `(updated_at desc, id desc)` 索引需要逐字匹配的形状。
+- 三条易糊验证都做了变异：**对照**那条把 `listPublished` 的 `status = 'published'` 改成 `status <> 'draft'` → 1 红；**顺序**那条改成 `published_at desc nulls last` 或 `created_at desc, id desc` → 各 3 红；**守卫顺序**那条把 `requireAdmin` 换成 `requireCsrfHeader` → 21 红，加上 CSRF 一起挂 → 14 红（含专门测"管理员不带 CSRF 头也得放行"的那条）。另有两处更细的：游标改用发给客户端的毫秒值 → 1 红；行值比较里删掉 tie-breaker 的 `id`（语法完全合法、两个参数都绑上了）→ 红在 `seed row cjk-emoji: expected [] to have a length of 1`——**这一条证明翻页真的走过了 seed 那 7 行的并列组**，不是理论上的并列。
+- `listForAdmin` 把 `list()` 那 8 行分页组装**复制**了一份而不是抽公共 helper，实现者主动报出来请我定。我判**保留**：两者的游标键一个是 `published_at` 一个是 `updated_at`，而 `list()` 带着"`published_at` 为 null 就是不变量被破坏"这个前提，管理路径必须不继承它——抽出来的泛型 helper 会让改动管理员分页有可能波及一个自 S1 起稳定的公开响应。8 行重复是这个判断的价格。
+- 门禁：`-r lint` 0 错、`-r check` 0 错、`--filter api test` **18 文件 / 220 测试**（基线 17/197，+1 文件 +23 测试）。`-r build` 后真发了一次请求（不是只 import 模块）：列表 200 且含 `draft-unpublished`、详情 200 带 10 个字段、第二页与第一页不交、无凭证 401、`?status=nope` 400。库内残留 `ad-%` 文章与用户各 0，历史三套件各 0，`articles` 回到 seed 的 7。
+- **给 D 的两个实况提示**：① seed 那 7 行的 `updated_at` 精确到微秒**完全相同**（`min = max = 2026-09-28T11:24:00.908386Z`），所以刚 seed 完的管理列表实际上是按 uuid 排的——界面别把"顺序看起来随机"当成 bug 去修；② 前端 `AdminArticleEditor.tsx:40` 用的确实是公开详情端点（`articlesApi.ts:36-43` 把 404 映射成 null），这就是"草稿变成空白表单"的机制，D 要改的就是这一行调用。
+- 顺手记一笔与 D0 无关的仓库垃圾：`apps/api/undefined/temp/tsx-15532/` 有**两个已被提交**的 tsx 缓存文件（上次会话产物）。清理属 `git rm -r` + 一条 `.gitignore`，留给收尾一次性做，不在这里顺手改。
+
+---
+
 ## D · 前端切换并脱离 Supabase ← 里程碑
 
 - [ ] `apiClient`：`request<T>` 的方法联合扩到 `PATCH | DELETE`，CSRF 头覆盖所有写方法
