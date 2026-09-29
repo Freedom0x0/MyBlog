@@ -45,8 +45,10 @@ export const ERROR_CODES = {
   slugConflict: 'SLUG_CONFLICT',
 
   /**
-   * A comment's `parentId` referenced a comment on a different article. Declared
-   * here so the write-path contract is complete; implemented in stage B.
+   * A comment's `parentId` referenced a comment on a different article, or one
+   * that is no longer there. 400 rather than 404: the caller's own request is the
+   * thing that is wrong, and a reply target is not a resource they are entitled to
+   * probe for existence either way.
    */
   invalidCommentParent: 'INVALID_COMMENT_PARENT',
 } as const
@@ -209,6 +211,27 @@ export interface CommentNode {
   content: string
   author: CommentAuthor
   createdAt: string
+}
+
+/**
+ * Body of `POST /api/v1/articles/:slug/comments`.
+ *
+ * Carries no author field on purpose: the commenter's identity comes from the
+ * verified token, never from the request body. Accepting one would let any client
+ * comment as anyone else, and the validator strips unknown keys so a sent
+ * `user_id` is discarded rather than honoured.
+ *
+ * `content` is length-bound to match the database `check`
+ * (`length(content) between 1 and 4000`). Both ends enforce it deliberately
+ * (S3-R6): the DTO answers 400 at the boundary instead of letting a constraint
+ * violation climb out of the driver as a 5xx, and the database keeps the rule for
+ * every writer that bypasses this API — a future migration, a `psql` session, the
+ * publish CLI. Neither is the guard; the pair is.
+ */
+export interface CreateCommentInput {
+  content: string
+  /** An existing comment on the *same* article. Cross-article trees are refused. */
+  parentId?: string | null
 }
 
 export interface CommentList {
