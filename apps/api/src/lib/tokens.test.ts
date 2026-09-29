@@ -6,18 +6,22 @@ import { generateJti, generateRefreshToken, hashToken, tokenFingerprint } from '
 const SECRET = 'a'.repeat(43)
 
 /**
- * Mirrors how the app registers the plugin, so a pass here means something.
- *
- * A bespoke signing helper would let these tests green-light a token format the
- * real verifier never accepts.
+ * Reads the exp claim without verifying, purely to assert the shape we sign.
+ * Kept separate from buildVerifier's docs: a script edit had stacked both
+ * comments onto this function, which reads as if one of them were missing.
  */
-/** Reads the exp claim without verifying, purely to assert the shape we sign. */
 function extractExp(token: string): number | undefined {
   const [, payload] = token.split('.')
   const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString()) as { exp?: number }
   return decoded.exp
 }
 
+/**
+ * Mirrors how the app registers the plugin, so a pass here means something.
+ *
+ * A bespoke signing helper would let these tests green-light a token format the
+ * real verifier never accepts.
+ */
 async function buildVerifier() {
   const app = Fastify({ logger: false })
   await app.register(jwt, { secret: SECRET, cookie: { cookieName: 'portal_access', signed: false } })
@@ -114,8 +118,10 @@ describe('access token verification', () => {
 
     const err = (() => { try { app.jwt.verify(token); return null } catch (e) { return e as Error & { code?: string } } })()
     expect(err, 'expired token should be rejected').not.toBeNull()
-    // The distinct code is what lets the guard answer TOKEN_REVOKED vs
-    // UNAUTHORIZED rather than lumping every rejection into one bucket.
+    // The library distinguishes expiry from a bad signature, and that distinction
+    // is kept for logs and metrics only. At the HTTP boundary every token failure
+    // answers the same 401 UNAUTHORIZED: a different code would tell the caller
+    // which of their guesses matched something stored.
     expect(err?.code).toContain('EXPIRED')
 
     await app.close()

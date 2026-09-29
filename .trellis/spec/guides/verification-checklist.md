@@ -108,10 +108,6 @@ Prefer per-edit reporting over all-or-nothing when a batch has independent items
 
 ---
 
----
-
----
-
 ## Related
 
 - [Backend conventions](../backend/conventions.md) §8–§10 — migrations must be executed against a scratch database; `ORDER BY` must match the index expression; GIN serves only `@>`; job-level CI env is visible to every step
