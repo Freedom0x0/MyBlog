@@ -16,32 +16,15 @@ interface GithubProject {
   language: string;
 }
 
-const FALLBACK_PROJECTS: GithubProject[] = [
-  {
-    id: 1132046393,
-    name: "CareerCraftHub-vue2",
-    description: "Vue2 career platform",
-    html_url: "https://github.com/guoshaoran/CareerCraftHub-vue2",
-    stargazers_count: 0,
-    language: "Vue"
-  },
-  {
-    id: 1099107578,
-    name: "My-Platform",
-    description: "a project made by vue and cursor",
-    html_url: "https://github.com/guoshaoran/My-Platform",
-    stargazers_count: 0,
-    language: "Vue"
-  },
-  {
-    id: 1044262775,
-    name: "phaser-game",
-    description: "Phaser based web game",
-    html_url: "https://github.com/guoshaoran/phaser-game",
-    stargazers_count: 0,
-    language: "JavaScript"
-  }
-];
+/**
+ * The GitHub account whose public repositories the "开源项目" section lists.
+ *
+ * Named once and used once on purpose: this string was previously pasted inline
+ * into a fetch URL *and* into three fallback links, which is how it went stale in
+ * four places at once — the account is `Freedom0x0`, and the old value made
+ * `api.github.com/users/<name>/repos` answer 404 on every page load.
+ */
+const GITHUB_OWNER = 'Freedom0x0';
 
 export default function Home() {
   const [projects, setProjects] = useState<GithubProject[]>([]);
@@ -63,21 +46,24 @@ export default function Home() {
          * Properly fixing it means fetching repos server-side and caching them,
          * which is defect D11 and belongs with the write path work, not here.
          */
-        const response = await fetch('https://api.github.com/users/guoshaoran/repos?sort=updated&per_page=6');
+        const response = await fetch(
+          `https://api.github.com/users/${GITHUB_OWNER}/repos?sort=updated&per_page=6`,
+        );
 
         if (response.ok) {
           const data = await response.json();
           setProjects(data);
-        } else if (response.status === 403) {
-          const errorData = await response.json();
-          if (errorData.message.includes('rate limit exceeded')) {
-            console.warn('GitHub API rate limit exceeded, using fallback projects.');
-            setProjects(FALLBACK_PROJECTS);
-          }
+        } else {
+          // Rate limit, downtime, a renamed account — the section says "拉不到" and
+          // leaves it at that. It used to swap in a hardcoded snapshot of three
+          // repositories instead, and that snapshot had rotted in place: one repo
+          // renamed, one deleted, and all three pointing at an account that no
+          // longer exists. A stale list is worse than an empty one because it reads
+          // as fact.
+          console.warn(`GitHub repos unavailable (${response.status}); showing an empty section.`);
         }
       } catch (error) {
         console.error('Failed to fetch GitHub projects:', error);
-        setProjects(FALLBACK_PROJECTS);
       } finally {
         setLoadingProjects(false);
       }
@@ -146,6 +132,16 @@ export default function Home() {
         {loadingProjects ? (
           <div className="flex justify-center py-10">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+          </div>
+        ) : projects.length === 0 ? (
+          /**
+           * The honest third state. Without it a failed fetch rendered the heading
+           * and then nothing at all, which is indistinguishable from "this person
+           * has no repositories" — a claim about the author that the page is not
+           * entitled to make.
+           */
+          <div className="py-10 mb-20 text-center text-sm text-muted-foreground">
+            暂时拉不到 GitHub 仓库列表（接口限流或不可达）。稍后刷新即可，这里不放占位内容。
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 mb-20">
