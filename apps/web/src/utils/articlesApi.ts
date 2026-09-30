@@ -7,6 +7,8 @@ import type {
   ArticleStatus,
   ArticleSummary,
   CreateArticleInput,
+  ImportArticleFile,
+  ImportArticlesResponse,
   UpdateArticleInput,
 } from 'shared'
 
@@ -105,4 +107,28 @@ export async function updateArticle(slug: string, input: UpdateArticleInput): Pr
 /** `DELETE /api/v1/articles/:slug` → 204. */
 export async function deleteArticle(slug: string): Promise<void> {
   return apiDelete(`/articles/${encodeURIComponent(slug)}`)
+}
+
+/**
+ * `POST /api/v1/articles/import` → 200 with one result per file.
+ *
+ * The *raw* markdown text is what travels. Parsing lives on the server so that
+ * there is exactly one parser and exactly one write path (design §3): a client
+ * that parsed front-matter itself would be a second validator that a hand-edited
+ * request body walks around.
+ *
+ * Overwriting a collision therefore does not need a browser-side parser either:
+ * a `conflict` result carries `proposed`, the structured draft the server had
+ * already built and chose not to write (design §3.3). Handing that to
+ * `updateArticle(slug, proposed)` is the whole overwrite path — one parse, one
+ * write door, and the decision made per row by a person who can see the filename.
+ *
+ * A 200 can contain `kind: 'conflict'` rows *and* already-written drafts (design
+ * §6): the batch was accepted, so the status says nothing about individual files.
+ * Callers must render `results`, not treat 200 as "everything became an article".
+ */
+export async function importArticles(
+  files: ImportArticleFile[],
+): Promise<ImportArticlesResponse> {
+  return apiPost<ImportArticlesResponse>('/articles/import', { files })
 }

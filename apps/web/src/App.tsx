@@ -4,6 +4,7 @@ import SplashScreen from './components/SplashScreen';
 import Home from './pages/Home';
 import ArticleDetail from './pages/ArticleDetail';
 import AdminArticleEditor from './pages/AdminArticleEditor';
+import AdminArticleList from './pages/AdminArticleList';
 import { AnimatePresence } from 'framer-motion';
 import { useAuthStore } from './store/authStore';
 import Header from './components/Header';
@@ -43,6 +44,10 @@ function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/blog/:slug" element={<ArticleDetail />} />
+        {/* The list comes before :slug/edit only for readability — React Router v6
+            ranks static segments above dynamic ones, so /admin/articles/new still
+            resolves to the editor and not to this page. */}
+        <Route path="/admin/articles" element={<AdminArticleList />} />
         <Route path="/admin/articles/new" element={<AdminArticleEditor />} />
         <Route path="/admin/articles/:slug/edit" element={<AdminArticleEditor />} />
       </Routes>

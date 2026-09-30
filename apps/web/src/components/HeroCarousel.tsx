@@ -52,11 +52,20 @@ const HeroCarousel: React.FC<{ articles: ArticleSummary[] }> = ({ articles }) =>
               className="relative w-full h-full cursor-pointer"
               onClick={() => navigate(`/blog/${article.slug}`)}
             >
-              <img
-                src={article.coverImage ?? ''}
-                alt={article.title}
-                className="absolute inset-0 w-full h-full object-cover"
-              />
+              {article.coverImage ? (
+                <img
+                  src={article.coverImage}
+                  alt={article.title}
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+              ) : (
+                /**
+                 * Null in the contract, so no `<img src="">`: an empty src is the
+                 * broken-image slot, and this hero is full-bleed, so it would be the
+                 * first thing a visitor sees wrong.
+                 */
+                <div className="absolute inset-0 bg-gradient-to-br from-muted to-secondary" />
+              )}
               <div className="absolute inset-0 bg-gradient-to-t from-background via-background/20 to-transparent" />
               <div className="absolute inset-0 flex flex-col items-center justify-end pb-20 px-4 text-center">
                 <motion.div

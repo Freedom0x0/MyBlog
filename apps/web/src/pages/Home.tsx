@@ -208,11 +208,21 @@ export default function Home() {
                 className="bg-card rounded-2xl overflow-hidden border border-border hover:border-primary/50 transition-colors group"
               >
                 <div className="h-48 overflow-hidden relative">
-                  <img
-                    src={article.coverImage ?? ''}
-                    alt={article.title}
-                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
-                  />
+                  {article.coverImage ? (
+                    <img
+                      src={article.coverImage}
+                      alt={article.title}
+                      className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                    />
+                  ) : (
+                    /**
+                     * `coverImage` is nullable in the contract, and `src={x ?? ''}` fed
+                     * an empty string to `<img>` — the browser's broken-image slot where
+                     * a plain block belongs. Same handling the article detail page got in
+                     * D-1; every seeded article is in this branch today.
+                     */
+                    <div className="w-full h-full bg-gradient-to-br from-muted to-secondary" />
+                  )}
                   <div className="absolute top-4 left-4">
                     <span className="px-3 py-1 bg-primary text-primary-foreground text-[10px] font-bold uppercase rounded-full">
                       {article.category}

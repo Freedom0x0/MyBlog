@@ -1,6 +1,7 @@
 import { useAuthStore } from '../store/authStore';
 import { useTheme } from '../hooks/useTheme';
 import { Moon, Sun } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { loginUrl } from '../utils/authApi';
 
 export default function Header() {
@@ -50,11 +51,26 @@ export default function Header() {
           {user ? (
             <div className="flex items-center space-x-4">
               <div className="flex items-center space-x-2">
-                <img
-                  src={user.avatarUrl || ''}
-                  alt={displayName}
-                  className="w-8 h-8 rounded-full border border-border"
-                />
+                {user.avatarUrl ? (
+                  <img
+                    src={user.avatarUrl}
+                    alt={displayName}
+                    className="w-8 h-8 rounded-full border border-border"
+                  />
+                ) : (
+                  /**
+                   * The same empty-`src` class already removed from the article cards
+                   * and the comment list: `avatarUrl` is nullable in the contract, and
+                   * the seeded admin (or any session created before avatars were
+                   * captured) has none. An initial in a circle beats a broken image.
+                   */
+                  <span
+                    aria-hidden="true"
+                    className="w-8 h-8 rounded-full border border-border bg-primary/20 text-primary text-sm font-semibold flex items-center justify-center"
+                  >
+                    {displayName.slice(0, 1).toUpperCase()}
+                  </span>
+                )}
                 <span className="text-sm font-medium hidden sm:inline-block">
                   {displayName}
                 </span>
@@ -64,6 +80,21 @@ export default function Header() {
                   </span>
                 )}
               </div>
+              {isAdmin && (
+                /**
+                 * The way into /admin/articles. Without this link the list page is
+                 * reachable only by typing the URL: the header used to offer the
+                 * avatar, the Admin badge and 登出 — nothing that led to the back
+                 * office at all, which is what S3-R22's list page would otherwise
+                 * have been built behind.
+                 */
+                <Link
+                  to="/admin/articles"
+                  className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  文章管理
+                </Link>
+              )}
               <button
                 onClick={handleLogout}
                 className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
