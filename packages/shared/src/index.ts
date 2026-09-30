@@ -266,6 +266,20 @@ export interface ImportArticleConflictResult {
   slug: string
   /** Human-readable reason, safe to show as-is. */
   message: string
+  /**
+   * The parsed draft this file would have created, already validated against the
+   * create endpoint's own DTO.
+   *
+   * It exists so "overwrite?" can be answered by one click. Without it the page
+   * holds only the raw markdown, `PATCH` takes structured fields, and the client
+   * would need its own front-matter parser to bridge them — which is the second
+   * validator design §3 refuses. This is not a second parser; it is the same
+   * object `service.importAll` built in phase 1 and never wrote.
+   *
+   * It also echoes back what the requester just sent, so it discloses nothing
+   * beyond their own file (decision recorded in design §3.3).
+   */
+  proposed: CreateArticleInput
 }
 
 export type ImportArticleResult = ImportArticleCreatedResult | ImportArticleConflictResult

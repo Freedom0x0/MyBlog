@@ -465,6 +465,54 @@ describe('slug conflicts are reported per file (S3-R10)', () => {
   })
 })
 
+describe('a conflict hands back the draft it would have written (design §3.3)', () => {
+  it('carries the parsed fields, and overwriting with them really changes the row', async () => {
+    const value = slugOf('overwrite')
+    const first = { name: 'v1.md', markdown: markdown(value, { fields: { title: '第一版' }, body: '最初的正文。' }) }
+    const second = { name: 'v2.md', markdown: markdown(value, { fields: { title: '第二版' }, body: '改过的正文。' }) }
+
+    expect((await importFiles([first])).statusCode).toBe(200)
+    const before = await articleCount()
+
+    const response = await importFiles([second])
+    expect(response.statusCode).toBe(200)
+    const conflicted = conflictResult(results(response)[0], 'v2.md')
+
+    // `proposed` is what the file *would* have created — parsed server-side, so the
+    // page never needs a parser of its own to offer "overwrite".
+    expect(conflicted.proposed.title).toBe('第二版')
+    // Compared trimmed on purpose: the parser keeps the body's trailing newline
+    // (`parseFixture` strips only a leading one), so the exact bytes here are the
+    // fixture's shape, not the thing under test. What matters is that the very
+    // value handed back is the value that lands — asserted on the next round below.
+    expect(conflicted.proposed.content.trim()).toBe('改过的正文。')
+    expect(conflicted.proposed.slug).toBe(value)
+    // Same structural guarantee as the request path: a carried draft has no way to
+    // say "published", so an overwrite cannot smuggle a status in.
+    expect(conflicted.proposed).not.toHaveProperty('status')
+
+    // The point of returning it: one PATCH with that body overwrites, no duplicate.
+    const overwrite = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/articles/${value}`,
+      headers: adminHeaders(),
+      payload: conflicted.proposed,
+    })
+    expect(overwrite.statusCode).toBe(200)
+    expect(overwrite.json().title).toBe('第二版')
+    // Byte-for-byte what `proposed` carried is what the row now holds — this is the
+    // one assertion that proves the round trip does not silently reshape the text.
+    expect(overwrite.json().content).toBe(conflicted.proposed.content)
+
+    expect(await articleCount()).toBe(before)
+    const rows = await storedRows([value])
+    expect(rows).toHaveLength(1)
+    // Overwrite still does not publish: PATCH here carried no status, and the row
+    // was a draft before, so it must still be invisible publicly.
+    expect(rows[0]!.status).toBe('draft')
+  })
+})
+
 describe('size limits', () => {
   it('refuses one file over the per-file byte cap with the DTO message, writing nothing', async () => {
     const before = await articleCount()

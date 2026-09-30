@@ -307,6 +307,13 @@ export const ImportArticleResultSchema = z.discriminatedUnion('kind', [
     kind: z.literal('conflict'),
     slug: z.string(),
     message: z.string(),
+    /**
+     * The parsed draft, returned so the page can offer one-click overwrite
+     * (design §3.3). It is the *same* `CreateArticleInput` the service built in
+     * phase 1 — no re-parsing, no second validator, and the object that would have
+     * been written had the slug been free.
+     */
+    proposed: CreateArticleSchema,
   }),
 ])
 

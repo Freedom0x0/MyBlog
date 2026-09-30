@@ -323,7 +323,16 @@ export class ArticleService {
         // Catching `Error` here would dress an infrastructure failure up as a
         // business outcome and report 200 for a request the server could not serve.
         if (error instanceof ApiError && error.code === ERROR_CODES.slugConflict) {
-          results.push({ name, kind: 'conflict', slug: input.slug, message: error.message })
+          // `proposed` is the object this loop already built and deliberately did
+          // not write, returned so "overwrite?" costs one PATCH instead of a second
+          // parser in the browser (design §3.3).
+          results.push({
+            name,
+            kind: 'conflict',
+            slug: input.slug,
+            message: error.message,
+            proposed: input,
+          })
           continue
         }
         throw error
