@@ -177,7 +177,15 @@ describe('login', () => {
     const result = await login('/blog/x')
 
     expect(result.statusCode).toBe(302)
-    expect(result.location).toBe('/blog/x')
+    /**
+     * Absolute, and pointed at the web origin — this is the defect that survived
+     * every previous version of this assertion: comparing the header verbatim
+     * accepted `/blog/x`, which a browser resolves against *this API* (3001), so a
+     * correct login landed on the API's 404 page. The first real sign-in caught what
+     * no inject-based test could.
+     */
+    expect(result.location).toBe(`${config.PORTAL_WEB_ORIGIN}/blog/x`)
+    expect(new URL(result.location).origin).toBe(config.PORTAL_WEB_ORIGIN)
 
     const access = result.cookies.find((c) => c.startsWith('portal_access=')) ?? ''
     const refresh = result.cookies.find((c) => c.startsWith('portal_refresh=')) ?? ''
@@ -390,7 +398,7 @@ describe('return_to', () => {
     const result = await login(attempted)
 
     expect(result.statusCode).toBe(302)
-    expect(result.location).toBe('/')
+    expect(result.location).toBe(`${config.PORTAL_WEB_ORIGIN}/`)
   })
 
   /**
@@ -402,7 +410,8 @@ describe('return_to', () => {
   it('passes through a same-site path carrying a URL in its query', async () => {
     const benign = '/redirect?to=https%3A%2F%2Fexample.org'
 
-    expect((await login(benign)).location).toBe(benign)
+    // The path passes through unchanged; only the origin is hung in front of it.
+    expect((await login(benign)).location).toBe(`${config.PORTAL_WEB_ORIGIN}${benign}`)
   })
 
   /**
@@ -418,8 +427,20 @@ describe('return_to', () => {
     const encoded = '/%2f%2fevil.example'
     const { location } = await login(encoded)
 
-    expect(location).toBe(encoded)
-    expect(new URL(location, 'https://good.example').origin).toBe('https://good.example')
+    expect(location).toBe(`${config.PORTAL_WEB_ORIGIN}${encoded}`)
+
+    /**
+     * Judged against the URL the browser is actually handed. The previous version
+     * resolved a *relative* Location against a made-up base
+     * (`new URL(location, 'https://good.example')`), so it reported "same origin"
+     * no matter what — it could not have caught a redirect that resolves against
+     * the API instead. An absolute Location makes the claim checkable: still on the
+     * web origin, and the encoded slashes stay one literal path segment rather than
+     * turning into a protocol-relative URL.
+     */
+    const resolved = new URL(location)
+    expect(resolved.origin).toBe(config.PORTAL_WEB_ORIGIN)
+    expect(resolved.pathname).toBe(encoded)
   })
 })
 

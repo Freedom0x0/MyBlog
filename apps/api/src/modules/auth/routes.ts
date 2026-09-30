@@ -171,7 +171,14 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
       attach(reply, session)
       request.log.info({ userId, login: profile.login }, 'login succeeded')
 
-      return reply.redirect(safeReturnTo(returnTo), 302)
+      // An ABSOLUTE target, on purpose. `Location: /blog/x` is resolved by the
+      // browser against the URL that answered the redirect — this API, port 3001 —
+      // not against the site the person came from, so a successful sign-in ended on
+      // the API's 404 page. Every existing test compared the header verbatim and
+      // saw `/blog/x`, which is why it took a real browser to find. `safeReturnTo`
+      // still does its job: only a rooted path can reach here, and it is hung off
+      // the one origin the config allows.
+      return reply.redirect(`${app.config.PORTAL_WEB_ORIGIN}${safeReturnTo(returnTo)}`, 302)
     },
   )
 
