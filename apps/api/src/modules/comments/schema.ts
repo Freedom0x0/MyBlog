@@ -43,7 +43,18 @@ export const COMMENT_MAX_LENGTH = 4000
  * check here only says "not a typo, not a SQL fragment".
  */
 export const CreateCommentSchema = z.object({
-  content: z.string().min(COMMENT_MIN_LENGTH).max(COMMENT_MAX_LENGTH),
+  content: z
+    .string()
+    .min(COMMENT_MIN_LENGTH)
+    .max(COMMENT_MAX_LENGTH)
+    // A comment of only whitespace is not "empty" to `length(content) between 1 and
+    // 4000` — three spaces measure 3 and pass both the column check and the DTO's
+    // own min, so the row used to be written and design §6's "空正文 → 400" was only
+    // half true. The refine rejects it without trimming the stored value: what a
+    // reader typed is what a reader sees.
+    .refine((value) => value.trim().length > 0, {
+      message: `comment content must contain at least one non-whitespace character`,
+    }),
   parentId: z.uuid().nullable().optional(),
 })
 

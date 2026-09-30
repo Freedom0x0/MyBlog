@@ -242,6 +242,15 @@ describe('POST /api/v1/articles/:slug/comments', () => {
     const empty = await postComment(slug, { content: '' })
     expect(empty.json().error.code).toBe(ERROR_CODES.badRequest)
 
+    // Whitespace-only used to land: `length('   ')` is 3, so both the database
+    // `check` and the DTO's own `min(1)` passed and a blank row was written. The
+    // refine in `CreateCommentSchema` is what makes design §6's "空正文 → 400" true
+    // rather than approximately true; it rejects without trimming, so what a reader
+    // typed is still byte-for-byte what a reader sees.
+    const whitespace = await postComment(slug, { content: '   ' })
+    expect(whitespace.statusCode).toBe(400)
+    expect(whitespace.json().error.code).toBe(ERROR_CODES.badRequest)
+
     const short = await postComment(slug, { content: 'x' })
     expect(short.statusCode).toBe(201)
     const long = await postComment(slug, { content: 'x'.repeat(COMMENT_MAX_LENGTH) })
