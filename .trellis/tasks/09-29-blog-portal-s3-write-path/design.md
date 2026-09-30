@@ -113,6 +113,16 @@ DELETE comment : 作者本人 → 204；管理员 → 204；其他人 → 403
 
 **仍然保留的性质**：并发导入同一 slug 仍恰好成功一次——A 阶段 `insertDraft` 的 `on conflict (slug) do nothing` 已经保证，不靠先查再写。
 
+### 3.3 冲突之后怎么覆盖（2026-09-29 用户定：方案 A）
+
+`S3-R10` 说"冲突行给一个覆盖按钮，点了才发 `PATCH`"，但按 C 阶段已提交的形状做不到：冲突项只带 `{name, kind, slug, message}`，**没有解析后的字段**，而 `PATCH` 收结构化 DTO；浏览器端不许有第二个 markdown 解析器（§3 的硬决定）。三个出路里用户选了 A：
+
+- **A（采纳）**：冲突项**带回 `proposed: CreateArticleInput`** —— 服务端已经解析并过完字段边界的那份草稿。界面的"覆盖"就是把这份 body 交给现存的 `PATCH /api/v1/articles/:slug`。解析仍只有一处，写仍只有 create/PATCH 这一条门，而"要不要盖"仍是人逐篇当场决定。
+- B（不采纳）：导入接口收一个 `overwrite` 开关、服务端替人更新。省一个往返，但把逐条决定压成一次批量勾选——**等于把上一轮已经作废的"文件永远赢"从后门请回来**。
+- C（不采纳）：不做覆盖，让用户先删旧稿再重导。零接口改动，代价是迭代一篇本地 `.md` 每次都要删一次；这种摩擦会让人退回编辑器，导入就退化成一一次性动作——而"我手上有 .md"正是导入这个功能存在的唯一理由。
+
+实现边界：`proposed` 就是 `service.importAll` 在阶段 1 已经算出来的那份 `CreateArticleInput`（同一个对象，不重解析、不改写），所以响应里出现它不引入第二条校验路径；它回显给的是**请求方自己提交的内容**，不含任何他人数据。"覆盖真的能落库"要有端到端测试（导→冲突→拿 `proposed` 发 PATCH→正文变新），不能只断言字段存在。
+
 ### 3.2 安全边界
 
 - **一律 `draft`**，front-matter 的 `status` 仍参与格式校验（值必须合法）但不参与决定；`published` 也建草稿（R9）。
@@ -181,7 +191,7 @@ key 形态：uploads/<yyyy>/<mm>/<random32hex>.<ext-from-sniffed-type>
 | `parentId` 属于另一篇文章 | 400 | `INVALID_COMMENT_PARENT` |
 | 评论 id 不存在（含被父线程 cascade 掉） | 404 | `NOT_FOUND` |
 | 删他人评论（非管理员） | 403 | `FORBIDDEN` |
-| 评论体空/超 4000 | 400 | `BAD_REQUEST` |
+| 评论体空/纯空白/超 4000 | 400 | `BAD_REQUEST`（空白那条是 D-2 补的：`length('   ')` 是 3，库的 check 与 DTO 的 `min(1)` 都放行，所以此前只有"空串"真被挡住；refine 拒绝"全是空白"但**不 trim**，存的仍是你打的字节） |
 | 上传声明类型与内容不符 | 415 | `UNSUPPORTED_MEDIA_TYPE` |
 | 上传超上限 | 413 | `PAYLOAD_TOO_LARGE` |
 | 未登录写任意资源 | 401 | `UNAUTHORIZED` |
