@@ -252,6 +252,16 @@ OPTIONS /api/v1/articles/x  Access-Control-Request-Method: PATCH
 
 **尚未点的一项（照实标注，不算过）**：§D 验收块里"清掉演示文章行，从空库写出第一篇可见文章"这一条**没有在真库上走过**。上表里的空状态、导入、发布、删除都点过，但库里始终留着 seed 那 7 篇，所以"真的是零篇文章的库"这个状态只验证到代码分支（`rows.length === 0` 那张卡片），没验证过一次从零开始的使用序列。要补的话：在列表页把那 7 行逐行删除（7 次 204，界面都有 confirm），点完空状态与新建，再用 `pnpm --filter api seed` 复原（seed 会换掉文章的 id，现有测试按 slug 找夹具行，因此不受影响）。
 
+**D-2 之后：真实 GitHub 登录第一次跑通（2026-09-29）**
+
+上面表格里所有管理员操作都是用**本地签发的令牌**注入 cookie 做的，所以"登录 → 回调 → 建会话"这条链当时**一次都没走过**。凭据补上之后第一次真走，它立刻暴露了一个前面所有手段都看不见的缺陷：
+
+- 回调成功（日志 `login succeeded`）、会话 cookie 种下了，但 `Location` 是**相对路径**，浏览器按 API 的 3001 解析 → 用户被丢在 API 的 404 页。修在 `auth/routes.ts`（挂到 `PORTAL_WEB_ORIGIN` 上），`safeReturnTo` 那道防开放重定向的闸门一字未动。
+- 更难看的是测试侧：`auth-flows.test.ts` 有一条断言**把 `Location: /blog/x` 当成契约**逐字比着；另一条用 `new URL(location, 'https://good.example')` 拿假想 base 解析相对地址，于是无论服务端返回什么都"没跳出本站"。四条断言已改，变异验证：把路由改回相对跳转 → **9 红 / 21 绿**。
+- **一条设计上的好消息第一次被真实流量证明**：登录写入的更新列表里刻意不含 `is_admin`，所以那次登录把 `github_login` 更新成了 `Freedom0x0`，而 `is_admin` 保持 `true`、也没多出第二行用户（`users` 仍 2 行）。这条以前只有注释和单元测试撑着，现在有了真实一次成功。
+- 环境侧记两笔给 S8：**Docker Desktop 停了会让 `/ready` 回 503**（postgres/redis 双双 failed），而 `/health` 仍回 200——liveness 与 readiness 分得对，但本地排障时别看错端口；OAuth 的 Client ID/Secret 只存在于**未入库**的 `apps/api/.env`（`.gitignore:22` 覆盖 `.env`，已用 `git check-ignore` 验过），全历史也从未提交过真 client id。
+
+
 **顺带修掉 D-2 报上来的一个后端真缺口**：纯空格的评论此前**会落库**——`length('   ')` 是 3，库的 check 与 DTO 的 `min(1)` 都放行，所以 design §6 那句"评论体空 → 400"当时只有一半真。现在 `CreateCommentSchema` 加了一条 refine 拒绝"全是空白"，但**不做 trim**：你打的字节仍按原样存，界面也不会替你改内容。测试补在 `comments-write.test.ts` 的边界那条里。
 
 **验证**：
