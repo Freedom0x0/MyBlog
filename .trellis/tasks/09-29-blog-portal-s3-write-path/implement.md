@@ -299,9 +299,9 @@ git tag s3-detached-from-supabase          # 里程碑标签
 
 **目标**：确认浏览器能否直传 MinIO（CORS）。这是 design §4.1 的未证事实。
 
-- [ ] Compose 加 `minio`（healthcheck、卷、`MINIO_API_CORS_ALLOW_ORIGIN`）
-- [ ] 起服务、建公开只读桶、签一个 PUT、**从浏览器同源策略的角度实测**一次跨源 PUT
-- [ ] **判定并写回本文末尾**：
+- [x] Compose 加 `minio`（healthcheck、卷、`MINIO_API_CORS_ALLOW_ORIGIN`）
+- [x] 起服务、建公开只读桶、签一个 PUT、**从浏览器同源策略的角度实测**一次跨源 PUT（结果见文末"浏览器实测那一发"）
+- [x] **判定并写回本文末尾**：
   - CORS 可行 → 走 presigned（下一步继续）
   - 不通 → 退回 API 中转（加 `@fastify/multipart`），并**在此处记录退回理由**，不许悄悄换
 
@@ -352,9 +352,253 @@ pnpm --filter api test -- uploads
 
 ---
 
-## SPIKE-E 结论（执行时填写）
+## SPIKE-E 结论（2026-10-05 执行）
 
-待填：CORS 是否可行、最终选了 presigned 还是 API 中转、理由。
+> 环境事实先记一笔，因为它改变了 compose 的形状：**MinIO 上游已经不再发布免费镜像**。
+> `docker pull minio/minio`（任意 tag，含历史 tag）一律 `error from registry: denied`，
+> `quay.io/minio/minio` 对匿名 manifest 请求回 401。本机 Docker 只能经镜像加速拉
+> `library/*`，所以 `minio/minio` 这条路在这台机器上根本不存在。
+> 替代：**`cgr.dev/chainguard/minio:latest`** —— Chainguard 对同一份 AGPL 上游源码的重建，
+> 容器内 `/usr/bin/minio --version` 实测输出 `RELEASE.2026-09-22T19-25-18Z`，是真 MinIO；
+> 且镜像自带 `/usr/bin/mc`（这是后面所有内容 provision 的工具，没给 `apps/api` 加任何依赖）。
+> compose 里注释了这段来历，避免下一个人在这里重新踩。
+
+### E 执行结论
+
+- [x] Compose 加 `minio`：healthcheck + 持久卷 + CORS（`infra/docker-compose.yml`，凭据走 `infra/.env`）
+- [x] 起服务、建公开只读桶 `portal-media`、签 PUT、curl 层面实测预检与真 PUT
+- [x] 判定：**CORS 可行 → F 走 presigned**（下方"判定"一节；`apps/api/src/**`、`apps/web/src/**` 一字未改）
+- [x] 真浏览器跨源 PUT：**200 + 可读回的 etag + 对象匿名 GET 200/70B**，探针对象已删；判定闭合（见本节末"浏览器实测那一发"）
+
+### 1. CORS 到底配在哪：`MINIO_API_CORS_ALLOW_ORIGIN` 存在，但 `--help` 里看不见
+
+按"以 `--help` 输出为准"的要求核：`minio --help` 与 `minio server --help` 的 FLAGS 里**没有任何 CORS 项**
+（只有 `--config/$MINIO_CONFIG`、`--address/$MINIO_ADDRESS`、`--console-address/$MINIO_CONSOLE_ADDRESS`、
+`--ftp`、`--sftp`、`--certs-dir`、`--quiet`、`--anonymous`、`--json`）。如果到此为止就会得出
+"这个环境变量不存在"的**错误结论** —— 它是 config key，不是 CLI flag，两个渠道都能看到它：
+
+```
+$ docker exec myblog-infra-minio-1 bash -c 'mc admin config get local api'
+# MINIO_API_CORS_ALLOW_ORIGIN=http://localhost:5175          ← 环境里设的就是它，被当注释回显
+api … cors_allow_origin=* …                                    ← 出厂默认是 *（任意源）
+```
+
+镜像里 `grep`/`sed`/`strings` 都没有，所以另用宿主 Node 扫了 `/usr/bin/minio` 二进制（110 MB），
+里面确有 `MINIO_API_CORS_ALLOW_ORIGIN`、`cors_allow_origin`、`corsConfig` 这些串。
+
+**结论：CORS 的配置项是 `MINIO_API_CORS_ALLOW_ORIGIN`（config key `api.cors_allow_origin`），
+它是服务端全局允许清单，compose 里就是这么配的。** 另有独立的每桶机制 `mc cors set`（S3
+`PutBucketCors`），实测本桶**没有**桶级 CORS（`mc cors get` → `No bucket CORS configuration found.`），
+下面所有预检结果都只由那一个环境变量产生 —— 也就是说"生效的是它"是测出来的，不是猜的。
+
+`*` 是默认值这点值得警惕：**不配就等于对任意网站开放预检**。写仍要签名，但这不是我们想要的边界，
+所以 compose 显式钉成前端源，并在 `.env.example` 注明"必须与页面 Origin 逐字节一致"。
+
+### 2. 预检响应头原文（curl 层面，签名无关所以无需遮蔽）
+
+请求：`OPTIONS http://localhost:9000/portal-media/spike/preflight-probe.png`
+带 `Origin: http://localhost:5175` + `Access-Control-Request-Method: PUT` + `Access-Control-Request-Headers: content-type`
+
+```http
+HTTP/1.1 204 No Content
+Access-Control-Allow-Credentials: true
+Access-Control-Allow-Headers: content-type
+Access-Control-Allow-Methods: PUT
+Access-Control-Allow-Origin: http://localhost:5175
+Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers
+Date: Mon, 05 Oct 2026 02:08:47 GMT
+```
+
+对照（同一个 OPTIONS，换成不在允许清单的源）：
+
+```http
+HTTP/1.1 204 No Content
+Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers
+```
+
+——**一个 `Access-Control-*` 头都不回**，浏览器会拦掉。这条对照才是"配置真的在起作用"的证据，
+也顺便说明：`Access-Control-Allow-Origin` 回显的是精确源而不是 `*`，所以 `credentials` 语义是干净的。
+
+预检要 `content-type, x-my-custom` 时，MinIO 把两个都反射进
+`Access-Control-Allow-Headers` —— 预检这关**不是**限制条件，限制在签名那关（见下面第 4 节）。
+
+### 3. presigned PUT 是怎么签的（以及 `mc` 为什么签不出来）
+
+**`mc share upload` 不给 presigned PUT。** 它输出的 `url` 字段是不带任何 `X-Amz-*` query 的裸 URL，
+真正可用的是 `share` 字段里的 **POST form / bucket-policy**（`-F policy=… -F x-amz-signature=…`）。
+拿那个裸 URL 直接 PUT 会是 403。这个版本（`mc version DEVELOPMENT.GOGET`）也没有 `mc presign`。
+
+所以真·presigned PUT URL 由一个**一次性脚本**签：
+`%TEMP%\miniospike\sign-presigned-put.mjs`（约 70 行，只用 `node:crypto`）。
+**没有装任何东西**：没进 `apps/api/package.json`，没进仓库，没碰 lockfile；脚本在仓库外，
+用完可直接删。判定如果走 presigned，F 在 API 里自己签（design §4.1 本来就是这个形状），
+这个脚本的使命到 spike 结束就结束了。
+
+签法要点（这几条都是踩过才知道的）：
+- `X-Amz-SignedHeaders=host` —— **只签 host**。于是浏览器可以自由声明任何 `Content-Type` 而签名不破
+  （实测：同一 URL 声明 `image/png` 与 `text/plain` 都 200）。
+- `X-Amz-Content-Sha256` 位置放 `UNSIGNED-PAYLOAD`。
+- path-style URI，每段单独 encode、保留 `/`；`X-Amz-Credential` 里的 `/` 必须是 `%2F`。
+  **`uriEncode` 只能做一遍**：第一版我写的是"把非 unreserved 字符全转 %XX"，它把
+  `encodeURIComponent` 已经产出的 `%2F` 又变成 `%252F`，MinIO 回
+  `400 <Code>MissingFields</Code>`（错误信息完全不指向编码，很难猜）。
+
+### 4. PUT 成功与失败的真账（服务端层面，辅助证据）
+
+同一批 10 分钟有效期的 presigned PUT URL，`curl` 实测：
+
+| # | 请求 | 结果 |
+|---|---|---|
+| 1 | PUT + `Origin: http://localhost:5175` + `Content-Type: image/png` + 69B PNG 体 | **`200 OK`**，带 `ETag: "ee76702403cd15dbc71587365494cbe5"`，**且响应本身带 `Access-Control-Allow-Origin: http://localhost:5175`** |
+| 2 | 匿名 GET 公开 URL（无任何凭据） | **`200 OK`**，`Content-Type: image/png`，`Content-Length: 69` —— 公开只读成立 |
+| 3 | **不带签名** PUT 同一 key | `403 AccessDenied` —— 写只认签名 |
+| 4 | 匿名 GET 桶根（列举） | `200 OK`，返回完整 `ListBucketResult` —— **匿名列举是开着的**，见下方缺口 |
+| 5 | PUT + 未签名的 `x-amz-meta-spike: 1` | `400 AccessDenied` — *"There were headers present in the request which were not signed"* |
+| 6 | PUT + `Authorization: Bearer nope` | `400 InvalidRequest` — *"request has multiple authentication types, please use one"* |
+| 7 | URL 过期后 PUT（`X-Amz-Expires=1`，等 4s） | `403 AccessDenied` — *"Request has expired"* |
+| 8 | 签名 host 是 `localhost:9000`，却发到 `127.0.0.1:9000` | `403 SignatureDoesNotMatch` |
+| 9 | PUT 声明 `Content-Type: text/plain`（类型未签） | `200 OK` —— 存的还是原始字节 |
+| 10 | PUT 带**浏览器整套自动头**（`Accept`、`Accept-Language`、`Referer`、`Sec-Fetch-*` 四件套、`User-Agent`、`Origin`、`Content-Type`） | **`200 OK`** ← 这条才是"浏览器能不能直传"的关键预测，见判定 |
+
+公开只读的落地方式：`mc anonymous set download local/portal-media`（`mc anonymous get` 回
+`Access permission for local/portal-media is download`）。桶由 `mc mb --ignore-existing` 建。
+
+**缺口（测出来的，不是推测的）**：`download` 这一档**连匿名列举一起放开了**。桶里放一个对象后
+不带任何凭据 `GET http://localhost:9000/portal-media/` 回 `200` + 完整 `ListBucketResult`，
+里面每条 `<Key>` 都在（实测样本：`<Key>uploads/2026/10/listprobe…</Key>`），而不存在的 key 仍正确回 404。
+影响的是 F 的一个隐含假设：design §4.2 让 key 由服务端随机生成，如果 F 把"key 猜不到"当成一道防线，
+**它不是** —— 随机 key 防的是*覆盖他人对象*和*路径穿越*（这两条依然成立），防不了枚举。
+对"博客封面图"这种本来就公开发布的字节来说风险很低，但**未发布的草稿封面在写进文章之前就已经可被列举**，
+这条要按事实交给 F：真要收口，`mc anonymous set` 的四档 `private/download/upload/public`
+（`mc anonymous set --help` 里就是这么列的）都不够用 —— `download` 已经是"能读对象"里最宽的一档，
+它表达不了"只给 `s3:GetObject`、不给 `s3:ListBucket`"。够用的路是 `mc anonymous set-json FILE TARGET`
+（下发一份只含 `s3:GetObject` 的匿名 JSON），F 里做启动期确保桶存在时顺手把策略钉成那份 JSON 即可。
+或者干脆接受"进了这个桶就等于公开"，把列举当无害。本轮两者都不做（做了就偏离 design §4.3 的"公开只读"），只记录。
+
+**#5/#6/#10 三条合起来是本轮最有用的一条**：MinIO 拒绝"未签名的、但对 S3 语义有影响的头"
+（`x-amz-*`、`Authorization`），却**放过浏览器自己硬加的那批**（`Sec-Fetch-*`、`Accept`、`User-Agent`、
+`Referer` …）。#10 用 curl 把这整套头原样发过去拿到了 200，说明浏览器那条路上没有"删不掉的头"会挡签名。
+这一条**不等于**浏览器实测通过 —— 它只是让失败点从"签名"移回"同源策略"，而同源策略正是 #2 已经量过的那件事。
+
+**顺手记一个 design 里没写到的事实**：`content-length-range`（design §4.2 要求"大小上限在签发时钉住"）
+**是 bucket-policy/POST 的条件，presigned PUT 没有它**。`mc share upload` 生成的 POST policy 里
+conditions 实测只有 `eq bucket / eq key / eq x-amz-date / eq x-amz-algorithm / eq x-amz-credential`，
+连 `content-length-range` 都没有。所以 F 想钉大小，只有两条路：自己签 POST policy（把条件加进去），
+或者在 `uploads/complete` 里用 HEAD object 复核真实大小再决定留不留。presigned PUT 这一侧
+**无法**限制体积，别在 F 里假装有。
+
+### 判定：**presigned**（CORS 可行）
+
+`MINIO_API_CORS_ALLOW_ORIGIN` 在本版本确实生效，跨源预检对 `PUT` + `content-type` 给出精确源回显，
+且**预检与真 PUT 的响应都带 `Access-Control-Allow-Origin`**（后者经常被忽略：没有它，JS 连状态码都读不到）。
+服务端层面从预检到写入到公开读整条链路都通。**F 按 design §4.1/§4.3 原方案做 presigned，不退回 API 中转。**
+
+**这个判定目前还差的一步**：真正的浏览器跨源 PUT。#10 是 curl 伪装的头极限，不是同源策略本身；
+`app.inject()` 那次教训的反面（真浏览器才会做预检）只有真浏览器能补。主控点完下面这段之后判定才算闭合。
+
+### 给主控：在真浏览器里执行的那一段
+
+前置：页面必须开在 **`http://localhost:5175`**（不能是 `127.0.0.1:5175`，design §5 那条同源约束）。
+这条在 MinIO 侧同样成立，实测过：同一个 OPTIONS，`Origin: http://127.0.0.1:5175` 回来的是
+`204` + **零个 `Access-Control-*` 头** —— 允许清单是精确串匹配，不做 `localhost`/`127.0.0.1` 归一。
+所以页面开错，失败会长成"CORS 拦了"的样子，而其实是源串不匹配。
+MinIO 容器 healthy；URL 里的 host 必须是 `localhost:9000` —— 签名只签了 `host`，
+换成 `127.0.0.1:9000` 就是 #8 那个 `SignatureDoesNotMatch`。
+
+presigned PUT URL（有效期 7 天，签给一个**当前不存在**的 key，key 见 `E_URL` 的 path 段）：
+
+```
+E_URL = <见本棒最终报告；形如
+http://localhost:9000/portal-media/uploads/2026/10/<32hex>.png?X-Amz-Algorithm=…&X-Amz-Signature=…>
+签名串不进任何可提交文件，故此处只留形状>
+```
+
+在**该页面的 DevTools Console** 里粘贴执行（不是 curl，不是新标签页地址栏——地址栏是顶层导航，不做 CORS）：
+
+```js
+// 从 http://localhost:5175 的页面里执行。E_URL 换成上面那条完整 presigned PUT URL。
+const E_URL = 'http://localhost:9000/portal-media/uploads/2026/10/….png?X-Amz-…';
+
+// 70 字节的合法 PNG（1x1），不依赖任何文件选择器；magic 实测 89504e47 开头
+const bytes = Uint8Array.from(atob(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+), (c) => c.charCodeAt(0));
+console.log('sending', bytes.length, 'bytes');  // 记住这个数，下面 curl 的 Content-Length 要跟它一致
+
+// 关键：除了 Content-Type 之外什么都别加。
+// 不要 headers: { Authorization, X-*, Content-Length … }（#5/#6 实测会被拒）。
+// 不要 mode:'no-cors' —— 那拿不到状态码，"成功"是假的。
+const res = await fetch(E_URL, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'image/png' }, // 唯一需要显式带的头；它不在签名里，写什么都行
+  body: bytes,
+  credentials: 'omit',                      // 预检回了 Allow-Credentials: true，但我们不需要 cookie
+  mode: 'cors',
+});
+
+console.log('status', res.status, 'etag', res.headers.get('etag'));
+// 期望：status 200，且 etag 非空（形如 "ee76…" 的 32 位 hex；值随字节内容变，不必跟本轮 curl 的一致，
+//       但 `res.headers.get('etag')` 能读到东西 —— 这一点本身就证明 CORS 放行了）。
+// 反过来，读不到头/读不到状态码的失败长这样：
+//   fetch 直接抛 TypeError: Failed to fetch（DevTools Network 里那条 OPTIONS 无 ACAO 响应）
+//   → 那就是 CORS 拦了，不是 MinIO 拦的。
+```
+
+**成功判据（两条都要）**：
+
+```bash
+# 1) 匿名读：不带任何凭据，公开 URL 必须回 200 且字节对得上
+KEY=uploads/2026/10/<上面那个 32hex>.png
+curl -s -D - -o /dev/null "http://localhost:9000/portal-media/$KEY" | sed -n '1p;/Content-Length/p;/ETag/p'
+#    预期：HTTP/1.1 200 OK / Content-Length 与 console 里打印的字节数一致（上面那段 base64 是 70）
+#          / ETag 与 fetch 打印的一致
+#    （执行前它是 404 —— 这个"先 404 后 200"的差别才是 PUT 真写进去的证明）
+
+# 2) 桶里确实多了一个对象
+docker exec myblog-infra-minio-1 bash -c "mc ls local/portal-media/$KEY --disable-pager"
+```
+
+如果浏览器这步炸了，**先看 Network 里那条 OPTIONS**，再下结论：
+OPTIONS 没有 `Access-Control-Allow-Origin` → CORS 问题（判定翻回"退回 API 中转"，并在此改写理由）；
+OPTIONS 有 ACAO、PUT 回了 4xx → **不是** CORS 问题，是签名/头的问题，把响应 XML 的 `<Code>` 带回来
+（`SignatureDoesNotMatch` / `AccessDenied` / `InvalidRequest` 分别对应 #8 / #5 / #6，都已复现过）。
+
+**执行完请清场**（桶要保持成"只有桶、没有 spike 遗产"的状态交给 F）：
+
+```bash
+docker exec myblog-infra-minio-1 bash -c "mc rm --force local/portal-media/$KEY --disable-pager"
+```
+
+### 浏览器实测那一发（主控执行，2026-10-05，判定就此闭合）
+
+在 `http://localhost:5175` 页面上下文里，对 presigned URL 发真 `fetch`（`method: PUT`、`mode: 'cors'`、`credentials: 'omit'`、只带 `Content-Type: image/png`、70 字节 PNG）：
+
+```
+origin  http://localhost:5175        ← 发起方，与 MinIO 不同源
+status  200
+etag    "2605723f72faf19be32a67eddc35ee1f"   ← 读得到，说明响应没被同源策略挡掉
+acao    http://localhost:5175
+```
+
+随后 `curl` 匿名读那个对象：`200 / Content-Length: 70 / Content-Type: image/png`，证明字节真落盘而不是 fetch 假成功。探针对象已 `mc rm` 删掉，`mc ls --recursive local/portal-media` 为空。
+
+**所以判定是闭合的，不是"看起来可行"**：curl 那 13 组（尤其 #10 带全套浏览器自动头拿 200）负责解释**为什么**能成，这一发负责证明**确实**能成。F 走 presigned。
+
+给 F 留的两条硬事实，都是从这次实测里掉出来的、文档上没有的：
+
+1. **`content-length-range` 在 presigned PUT 上不存在**（design §4.2 假设了它）。它是 POST policy 的条件，`mc share upload` 生成的 policy 实测也没有。所以体积上限只能在 `uploads/complete` 里 `HEAD object` 复核——签发给你的时候拦不住，只能事后不认。
+2. **`X-Amz-SignedHeaders=host` 意味着 `Content-Type` 不被签名保护**：客户端声明什么类型都签名不破。这正是 design §4.2 "客户端声明可以撒谎"的那一半，且比预想更彻底——所以**魔数嗅探必须是 F 的硬门，不能省**；`uploads` 里若按声明类型决定 key 后缀，写进去的字节和后缀可以毫无关系。
+
+### compose 落地时踩到的两个坑（不是 CORS，但会挡住下一个起这套环境的人）
+
+1. **镜像的 `/data` 是 root:root 0777，而容器默认 uid=65532**：MinIO 直接
+   `FATAL Unable to initialize backend: file access denied` 退出（跟 CORS 无关，容易误判成"镜像坏了"）。
+   compose 里用 `user: '0:0'` 绕开并注释了这是 dev-only 取舍；不想留 root 的话得加一个 chown 的
+   init 服务，本轮没做（那是 S8 的事）。
+2. **healthcheck 不能用 curl/wget/nc，甚至没有 `grep`/`head`/`sed`/`awk`/`find`**（Chainguard 最小镜像）。
+   探 `/minio/health/live` 用的是 bash 的 `/dev/tcp` 假设备 + 纯 builtin 比较；注意 compose 会把
+   `$$hc_resp` 里的 `$` 当变量插值，`read -r` 的**目标名**不能带 `$`（两处都实测炸过一次才写对）。
+   现在 `docker ps` 里 `myblog-infra-minio-1` 是 `healthy`，`localhost:9000/minio/health/live` 从宿主回 200。
 
 ## OWASP 写操作清单结论（执行时填写）
 
