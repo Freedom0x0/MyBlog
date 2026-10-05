@@ -11,20 +11,32 @@ import 'swiper/css/navigation';
 import 'swiper/css/pagination';
 import 'swiper/css/effect-fade';
 
-const HeroCarousel: React.FC<{ articles: ArticleSummary[] }> = ({ articles }) => {
+const HeroCarousel: React.FC<{ articles: ArticleSummary[]; loading?: boolean }> = ({
+  articles,
+  loading = false,
+}) => {
   const navigate = useNavigate();
 
   if (!articles.length) {
+    /**
+     * `loading` must come from the parent: it passes an empty array both while the
+     * request is in flight *and* when the blog genuinely has no articles. Without
+     * the distinction an empty site advertised "loading" forever — a spinner that
+     * is really a lie about being busy. Found by walking the site with the demo
+     * articles cleared, which nothing else had ever rendered.
+     */
     return (
       <div className="w-full h-[60vh] md:h-[80vh] relative overflow-hidden flex items-end">
         <div className="absolute inset-0 bg-gradient-to-br from-primary/20 via-background to-background" />
         <div className="relative w-full max-w-5xl mx-auto px-4 pb-16">
-          <div className="inline-flex items-center rounded-full bg-primary/15 text-primary px-4 py-2 text-xs font-semibold">
-            Loading
-          </div>
+          {loading && (
+            <div className="inline-flex items-center rounded-full bg-primary/15 text-primary px-4 py-2 text-xs font-semibold">
+              Loading
+            </div>
+          )}
           <div className="mt-6 text-4xl md:text-6xl font-black tracking-tight">Guoshaoran Blog</div>
           <div className="mt-4 text-muted-foreground text-base md:text-lg max-w-2xl">
-            正在加载文章轮播内容...
+            {loading ? '正在加载文章轮播内容...' : '这里还没有文章。'}
           </div>
         </div>
       </div>

@@ -84,7 +84,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-background text-foreground transition-colors duration-300">
-      <HeroCarousel articles={articles.length ? articles.slice(0, 6) : []} />
+      <HeroCarousel articles={articles.length ? articles.slice(0, 6) : []} loading={loadingArticles} />
       <main className="max-w-7xl mx-auto px-4 py-20">
         <div className="flex flex-col md:flex-row items-center justify-between gap-12 mb-20">
           <motion.div
