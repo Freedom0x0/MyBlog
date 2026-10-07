@@ -329,6 +329,25 @@ export function publicReadPolicy(bucket: string): string {
 }
 
 /**
+ * One `HeadBucket`, no recovery: this exists for `/ready`, which needs to answer
+ * "is the media store reachable?" and nothing else.
+ *
+ * It is deliberately NOT a method on `MediaStore`. The port is three methods by
+ * design (`store.ts`) so the upload rules can never reach bucket-level operations;
+ * a readiness probe is a different consumer and gets its own function, which keeps
+ * "the rules layer cannot create or re-policy a bucket" true.
+ */
+export async function checkMediaBucket({
+  client,
+  bucket,
+}: {
+  client: S3Client
+  bucket: string
+}): Promise<void> {
+  await client.send(new HeadBucketCommand({ Bucket: bucket }))
+}
+
+/**
  * Startup bucket assurance (design §4.3): one `HeadBucket`, and create-with-policy
  * only when the bucket is genuinely absent.
  *

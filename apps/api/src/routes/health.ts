@@ -38,27 +38,45 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
   app.get('/health', async (): Promise<LivenessPayload> => ({ status: 'ok' }))
 
   app.get('/ready', async (request, reply): Promise<ReadinessPayload> => {
-    // Both dependencies are always checked, rather than short-circuiting on the
+    // All three dependencies are always checked, rather than short-circuiting on the
     // first failure. When something is wrong, the first thing you want to know
     // is *which* dependency is down — short-circuiting hides that.
-    const [postgres, redis] = await Promise.allSettled([
+    const [postgres, redis, media] = await Promise.allSettled([
       withTimeout(app.db.query('select 1'), DEPENDENCY_TIMEOUT_MS, 'postgres'),
       withTimeout(app.redis.ping(), DEPENDENCY_TIMEOUT_MS, 'redis'),
+      withTimeout(app.mediaReady(), DEPENDENCY_TIMEOUT_MS, 'media'),
     ])
 
     const checks: Record<string, 'ok' | 'failed'> = {
       postgres: postgres.status === 'fulfilled' ? 'ok' : 'failed',
       redis: redis.status === 'fulfilled' ? 'ok' : 'failed',
+      media: media.status === 'fulfilled' ? 'ok' : 'failed',
     }
 
-    const allOk = Object.values(checks).every((value) => value === 'ok')
+    /**
+     * Two different questions, so two different values — and this split is the whole
+     * point of the `trafficOk` name.
+     *
+     * `trafficOk` (postgres + redis only) decides the **status code**, because those
+     * two are what makes an article read fail. Pulling an instance out of rotation
+     * for a MinIO outage would take the blog down over a feature that is only
+     * uploads.
+     *
+     * `status` additionally reflects media, so an operator or a monitoring query
+     * sees `degraded` while the site still serves 200s. That is the shape the type
+     * already implies: `degraded` is not `not ready`, and conflating them is how a
+     * media bucket ends up restarting a healthy process.
+     */
+    const trafficOk = checks.postgres === 'ok' && checks.redis === 'ok'
+    const allOk = trafficOk && checks.media === 'ok'
 
     if (!allOk) {
-      request.log.warn({ checks }, 'readiness check failed')
+      request.log.warn({ checks, trafficOk }, 'readiness check degraded or failed')
     }
 
-    // 503 is what tells a load balancer to stop routing here. Returning 200 with
-    // a failed body would keep traffic flowing to an instance that cannot serve.
+    // 503 is what tells a load balancer to stop routing here — see `trafficOk` above
+    // for why media failure does NOT earn one. Returning 200 with a failed body would
+    // keep traffic flowing to an instance that cannot serve.
     // `satisfies` here is not decoration. `reply.send()`'s payload parameter is
     // untyped in Fastify, so the `Promise<ReadinessPayload>` annotation on this
     // arrow never reaches the object literal below — measured, not assumed: adding a
@@ -68,7 +86,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
     // endpoint is the contract a load balancer reads, so drift here is exactly the
     // kind that should stop a build rather than surface as a probe that silently
     // never trips.
-    return reply.code(allOk ? 200 : 503).send({
+    return reply.code(trafficOk ? 200 : 503).send({
       status: allOk ? 'ok' : 'degraded',
       checks,
     } satisfies ReadinessPayload)

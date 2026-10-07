@@ -2,6 +2,7 @@ import fp from 'fastify-plugin'
 import type { FastifyInstance } from 'fastify'
 import type { Config } from '../config/index.js'
 import {
+  checkMediaBucket,
   createMediaS3Client,
   createS3MediaStore,
   ensureMediaBucket,
@@ -12,6 +13,15 @@ declare module 'fastify' {
   interface FastifyInstance {
     /** The media storage port, wired to MinIO. See modules/uploads/store.ts. */
     media: MediaStore
+    /**
+     * Resolves if the media bucket answers; throws if it does not.
+     *
+     * A separate decorator rather than a fourth `MediaStore` method: the port is
+     * three methods so the upload rules can never reach a bucket-level operation,
+     * and adding `ping()` to it would put that door back open for the one consumer
+     * that has no business writing to storage.
+     */
+    mediaReady: () => Promise<void>
   }
 }
 
@@ -44,6 +54,10 @@ export const mediaPlugin = fp(
     app.decorate(
       'media',
       createS3MediaStore({ client, bucket: config.MEDIA_BUCKET, log: app.log }),
+    )
+
+    app.decorate('mediaReady', () =>
+      checkMediaBucket({ client, bucket: config.MEDIA_BUCKET }),
     )
 
     // Never rejects — see the docblock on `ensureMediaBucket` for what it logs when

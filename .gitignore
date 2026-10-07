@@ -53,3 +53,7 @@ apps/web-next/test-results/
 # path out of an undefined variable (the directory is literally named `undefined`).
 # Untracked 2026-10-07; the files are still on disk, they are just not history anymore.
 apps/api/undefined/
+
+# Scratch directory CLI tooling writes response snapshots into while diagnosing.
+# Not a build artifact and not project output; kept out of history on purpose.
+.qoder-tmp/

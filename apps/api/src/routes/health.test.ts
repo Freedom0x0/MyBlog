@@ -6,10 +6,13 @@ import { healthRoutes } from './health.js'
 // them this test file would not know those decorators exist.
 import '../plugins/db.js'
 import '../plugins/redis.js'
+import '../plugins/media.js'
 
 interface Doubles {
   dbQuery?: () => Promise<unknown>
   redisPing?: () => Promise<unknown>
+  /** Must resolve `void`: that is what `app.mediaReady` is declared to return. */
+  mediaReady?: () => Promise<void>
 }
 
 /**
@@ -28,6 +31,10 @@ function buildTestApp(doubles: Doubles = {}): FastifyInstance {
   app.decorate('redis', {
     ping: doubles.redisPing ?? (async () => 'PONG'),
   } as never)
+
+  // `mediaReady` is a plain function in production (see plugins/media.ts), so this
+  // double needs no cast.
+  app.decorate('mediaReady', doubles.mediaReady ?? (async () => undefined))
 
   return app
 }
@@ -69,8 +76,35 @@ describe('GET /ready (readiness)', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({
       status: 'ok',
-      checks: { postgres: 'ok', redis: 'ok' },
+      checks: { postgres: 'ok', redis: 'ok', media: 'ok' },
     })
+
+    await app.close()
+  })
+
+  it('stays 200 but reports degraded when only the media store is down', async () => {
+    /**
+     * The split this file exists to protect. A MinIO outage breaks uploads and
+     * nothing else — article reads touch neither the bucket nor its policy — so
+     * answering 503 here would tell a load balancer to stop routing to an instance
+     * that is still serving the site. Before media was checked, this case was
+     * invisible: `/ready` said `ok` while every upload was failing.
+     */
+    const app = buildTestApp({
+      mediaReady: async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:9000')
+      },
+    })
+    await app.register(healthRoutes)
+
+    const response = await app.inject({ method: 'GET', url: '/ready' })
+    const body = response.json()
+
+    expect(response.statusCode).toBe(200)
+    expect(body.status).toBe('degraded')
+    expect(body.checks.media).toBe('failed')
+    expect(body.checks.postgres).toBe('ok')
+    expect(body.checks.redis).toBe('ok')
 
     await app.close()
   })
@@ -110,7 +144,7 @@ describe('GET /ready (readiness)', () => {
     const response = await app.inject({ method: 'GET', url: '/ready' })
 
     expect(response.statusCode).toBe(503)
-    expect(response.json().checks).toEqual({ postgres: 'ok', redis: 'failed' })
+    expect(response.json().checks).toEqual({ postgres: 'ok', redis: 'failed', media: 'ok' })
 
     await app.close()
   })
