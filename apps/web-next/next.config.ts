@@ -28,6 +28,21 @@ const config: NextConfig = {
         source: '/api/v1/:path*',
         destination: `${API_INTERNAL_URL}/:path*`,
       },
+      {
+        /**
+         * The feed is served by `app/rss/route.ts` and reached as `/rss.xml`.
+         *
+         * Not a style choice: a directory literally named `rss.xml` is rejected by
+         * Next 16 as an invalid segment — measured, the build failed with
+         * "Invalid segment configuration ... segments ['app/rss.xml/route.ts'] that's
+         * reserved", because a path segment carrying a dot is read as a reserved
+         * static file. The rewrite keeps the conventional, discoverable URL (the one
+         * `layout.tsx` advertises in `<link rel="alternate">` and that readers paste)
+         * while the handler lives at a name the router accepts.
+         */
+        source: '/rss.xml',
+        destination: '/rss',
+      },
     ]
   },
 

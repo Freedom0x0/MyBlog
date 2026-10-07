@@ -25,6 +25,15 @@ export const metadata: Metadata = {
   metadataBase: process.env.NEXT_PUBLIC_SITE_URL
     ? new URL(process.env.NEXT_PUBLIC_SITE_URL)
     : undefined,
+  // The machine-readable discovery tags. `alternates.types` is how a browser or a
+  // feed reader finds the RSS without being told the URL; `robots` here is the
+  // page-level hint, while /robots.txt (app/robots.ts) is the origin-level policy —
+  // both are legitimate and they are not the same document.
+  alternates: {
+    types: {
+      'application/rss+xml': '/rss.xml',
+    },
+  },
 }
 
 export const viewport: Viewport = {

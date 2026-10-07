@@ -66,10 +66,21 @@ export interface ArticleLookup {
  * detail page must render *its* not-found state (and 404 status) for a bad slug, not
  * the degraded one — those are different claims about the world.
  */
+/**
+ * The three answers a read can produce, named so callers can annotate.
+ *
+ * `fetchAllPublished` needs this annotation: inside a loop, narrowing `cursor` from
+ * a value assigned out of the previous iteration's response makes TypeScript's
+ * control-flow analysis circle back through `result` → `query` → `cursor`, which it
+ * reports as TS7022 rather than resolving. Naming the outcome type breaks the cycle
+ * at the cost of one alias.
+ */
+type JsonOutcome<T> = { kind: 'ok'; value: T } | { kind: 'not-found' } | { kind: 'unavailable' }
+
 async function getJSON<T>(
   path: string,
   label: string,
-): Promise<{ kind: 'ok'; value: T } | { kind: 'not-found' } | { kind: 'unavailable' }> {
+): Promise<JsonOutcome<T>> {
   let response: Response
 
   try {
@@ -129,6 +140,62 @@ export async function fetchArticleList(limit: number): Promise<ArticleList> {
   if (result.kind === 'not-found') return { articles: [], unavailable: true }
 
   return { articles: result.value.data, unavailable: false }
+}
+
+/**
+ * Every published article, by walking the keyset cursor to the end.
+ *
+ * This exists because `limit` is capped at 50 server-side
+ * (`ListQuerySchema` in `apps/api/src/modules/articles/schema.ts:25`), and a
+ * sitemap or RSS feed built from a single page would therefore **silently drop
+ * article 51 onward** — the worst kind of truncation, since it looks correct on a
+ * small blog and is discovered only after the blog has grown.
+ *
+ * `MAX_PAGES` bounds the loop rather than trusting the cursor to terminate: a
+ * contract break upstream (a `next` that repeats itself) must not turn a page
+ * generator into an unbounded fetch loop. 20 pages is 1 000 articles at the
+ * current cap, which is far past what a personal blog reaches; if that ever stops
+ * being true, raise the bound here rather than removing it.
+ */
+const MAX_PAGES = 20
+
+/** The server's own per-page ceiling (`ListQuerySchema`), so one page carries the most it can. */
+const LIST_PAGE_LIMIT_MAX = 50
+
+export async function fetchAllPublished(): Promise<ArticleList> {
+  const articles: ArticleSummary[] = []
+  let cursor: string | null = null
+
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const query: string =
+      cursor === null
+        ? `limit=${LIST_PAGE_LIMIT_MAX}`
+        : `limit=${LIST_PAGE_LIMIT_MAX}&cursor=${encodeURIComponent(cursor)}`
+
+    const result: JsonOutcome<ArticlePage> = await getJSON<ArticlePage>(
+      `/articles?${query}`,
+      'article list (feed)',
+    )
+
+    // A failure on a later page is not a licence to publish a half feed as if it
+    // were the whole one: report degraded, and let the callers emit the state that
+    // says so.
+    if (result.kind !== 'ok') return { articles: [], unavailable: true }
+
+    articles.push(...result.value.data)
+
+    const nextPage = result.value.next
+    if (nextPage === null) return { articles, unavailable: false }
+    cursor = nextPage.cursor
+  }
+
+  // MAX_PAGES × 50 = 1 000 published articles. Past that we ship what we have and
+  // shout, rather than returning nothing (worse for readers) or staying silent
+  // (worse for whoever has to debug this at 3am).
+  console.warn(
+    `[web-next] fetchAllPublished stopped at ${MAX_PAGES} pages — raise MAX_PAGES in lib/api.ts; the feed is truncated`,
+  )
+  return { articles, unavailable: false }
 }
 
 /**
