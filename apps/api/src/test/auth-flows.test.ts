@@ -52,6 +52,23 @@ beforeAll(async () => {
   process.env.OAUTH_BASE_URL = stub.url
   process.env.API_PUBLIC_URL = 'http://localhost:3001'
 
+  /**
+   * S6's anonymous ceiling raised for this file only, and this is the reason it is
+   * here rather than in the limiter: this suite drives the login flow ~20 times in
+   * under a minute, every one of them through `app.inject()` from the same address,
+   * and `/auth/github/start` is the one route bucketed by client IP. At the
+   * production default of 10/minute the 11th login would answer 429 — so every
+   * assertion after it would be testing the rate limiter's arithmetic instead of
+   * the OAuth state machine it is meant to be testing.
+   *
+   * The alternative was giving each request its own `X-Forwarded-For`, which would
+   * have made this file's fixtures depend on the header the limiter reads. Raising
+   * a ceiling that is not what this file is about is the smaller lie. The anon
+   * bucket itself — including that two addresses stay in two buckets — is asserted
+   * at its real configured value in `rate-limit.test.ts`.
+   */
+  process.env.RATE_LIMIT_ANON_PER_MINUTE = '500'
+
   app = await buildApp({ config: loadConfig(), loggerDestination: logStream })
   await waitForRedis(app)
 })

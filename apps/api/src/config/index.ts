@@ -134,6 +134,40 @@ const EnvSchema = z.object({
    * 60 s covers a cover image on a slow connection and nothing else.
    */
   MEDIA_PRESIGN_TTL_SECONDS: z.coerce.number().int().min(5).max(900).default(60),
+
+  // ── S6: rate limiting on the write surface ─────────────────────────────────
+  //
+  // DEFAULTED, NOT REQUIRED — and that is a deliberate departure from the rule the
+  // block above states. A required key is a CI contract (`.github/workflows/ci.yml`
+  // has to list it or every integration `beforeAll` dies on a `ConfigError`), so
+  // growing the required set widens the surface that can silently break CI. A
+  // rate-limit ceiling is the opposite kind of setting: there is a number that is
+  // right in every deployment, and refusing to boot over a typo in it would take
+  // the blog down to protect it. Both stay overridable because the right number
+  // for a burst — a first-import of a real archive — is not knowable now.
+
+  /**
+   * Per authenticated identity, per minute, across every write route.
+   *
+   * 60 rather than the reflexive 30 because 30 refuses legitimate work this
+   * project actually does: an admin importing 12 cover images makes 24 upload
+   * requests (a presign and a verify each), and the integration and `test:e2e`
+   * suites issue their writes inside the same window. A ceiling that the project's
+   * own normal operations reach is a ceiling that gets raised under pressure at
+   * 2am, which is worse than one set correctly once. The population being limited
+   * is one admin plus commenters, so 60 is still two per second of nothing.
+   */
+  RATE_LIMIT_WRITE_PER_MINUTE: z.coerce.number().int().min(1).default(60),
+
+  /**
+   * Per client IP, per minute, for the anonymous login entry point.
+   *
+   * 10 is a real limit here rather than a courtesy: one person who wants to log in
+   * uses this endpoint once or twice. It exists because a crawler or a script can
+   * hit `/auth/github/start` with no credential at all, and each hit mints a state
+   * row plus a cookie — so the only free-to-reach write-ish door in the API.
+   */
+  RATE_LIMIT_ANON_PER_MINUTE: z.coerce.number().int().min(1).default(10),
 })
 
 export type Config = z.infer<typeof EnvSchema>

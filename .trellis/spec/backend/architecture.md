@@ -75,6 +75,29 @@ declare module 'fastify' {
 Registration order matters: infrastructure first, then things that depend on it,
 then the error handler so it covers errors thrown by earlier plugins.
 
+### Request guards are attached per route, and their order is the contract
+
+Authorisation, CSRF and rate limiting are `onRequest` arrays on the route, not
+global hooks:
+
+```ts
+onRequest: [requireAdmin, requireCsrfHeader, requireWriteRateLimit]
+```
+
+The order is load-bearing in both directions. `requireAdmin` is what fills in the
+`request.auth` the limiter buckets on, so a limiter placed first has no identity to
+name; a limiter placed last never spends a caller's quota on a request that was
+already going to be refused for free two hooks earlier. A write route that shuffles
+this array, or drops the last entry, silently disables one guard while every
+existing test still passes — there is no global hook to fall back on, which is the
+same reason the array has to be repeated per route rather than inferred.
+
+Each guard is split the way the layering asks: `plugins/*.ts` decides *who* a
+request belongs to and what a refusal looks like, and `lib/*.ts` holds the
+arithmetic with an injected dependency in and a decision out — so the failure
+paths (a Redis that rejects, a counter at its boundary) stay unit-testable without
+a container.
+
 ---
 
 ## 4. Module resolution: explicit `.js` extensions

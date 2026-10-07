@@ -1,6 +1,7 @@
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod'
 import { requireAdmin } from '../auth/guards.js'
 import { requireCsrfHeader } from '../../plugins/auth.js'
+import { requireWriteRateLimit } from '../../plugins/rateLimit.js'
 import { CompletedUploadSchema, CompleteUploadSchema, PresignedUploadSchema, RequestUploadSchema } from './schema.js'
 import { UploadService } from './service.js'
 
@@ -34,7 +35,7 @@ export const uploadRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
     '/api/v1/uploads',
     {
-      onRequest: [requireAdmin, requireCsrfHeader],
+      onRequest: [requireAdmin, requireCsrfHeader, requireWriteRateLimit],
       schema: {
         body: RequestUploadSchema,
         response: { 201: PresignedUploadSchema },
@@ -52,7 +53,7 @@ export const uploadRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
     '/api/v1/uploads/complete',
     {
-      onRequest: [requireAdmin, requireCsrfHeader],
+      onRequest: [requireAdmin, requireCsrfHeader, requireWriteRateLimit],
       schema: {
         body: CompleteUploadSchema,
         response: { 200: CompletedUploadSchema },

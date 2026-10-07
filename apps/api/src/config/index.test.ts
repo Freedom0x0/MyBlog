@@ -34,6 +34,38 @@ describe('loadConfig', () => {
     expect(config.MEDIA_REGION).toBe('us-east-1')
     expect(config.MEDIA_MAX_UPLOAD_BYTES).toBe(5 * 1024 * 1024)
     expect(config.MEDIA_PRESIGN_TTL_SECONDS).toBe(60)
+
+    // S6-R7's two ceilings, asserted at their exact values because the numbers are
+    // the deliverable: 60 is the figure that lets an admin's 12-image import and
+    // this suite's own writes through, and 10 is the anonymous login door. A silent
+    // change to either is a change to what the API refuses in production.
+    expect(config.RATE_LIMIT_WRITE_PER_MINUTE).toBe(60)
+    expect(config.RATE_LIMIT_ANON_PER_MINUTE).toBe(10)
+  })
+
+  /**
+   * The CI contract, tested rather than commented.
+   *
+   * `conventions.md` §10 records twice now — once for missing keys, once for
+   * present ones — that whatever `loadConfig` demands, CI must supply. S6-R7 chose
+   * defaults for exactly that reason, and the choice is only real if an env with
+   * neither key still parses. If this test ever goes red because someone moved a
+   * limit to required, `.github/workflows/ci.yml`'s `env:` block is part of the
+   * same change and the suite will stay green here while failing only in CI.
+   */
+  it('needs no rate-limit keys to boot, so CI gains no new contract', () => {
+    // `validEnv` above carries neither key, so reaching this line at all is the
+    // assertion; the parse would have thrown in the line before it otherwise.
+    const bare = loadConfig(validEnv)
+    expect(bare.RATE_LIMIT_WRITE_PER_MINUTE).toBe(60)
+    expect(bare.RATE_LIMIT_ANON_PER_MINUTE).toBe(10)
+
+    // Overridable, and still a validated number rather than a string that reaches
+    // the counter arithmetic. `''` coerces to 0, which `min(1)` refuses: a limit of
+    // zero would 429 every write, and that must be a boot failure, not an outage.
+    expect(loadConfig({ ...validEnv, RATE_LIMIT_WRITE_PER_MINUTE: '500' }).RATE_LIMIT_WRITE_PER_MINUTE).toBe(500)
+    expect(() => loadConfig({ ...validEnv, RATE_LIMIT_WRITE_PER_MINUTE: '0' })).toThrowError(ConfigError)
+    expect(() => loadConfig({ ...validEnv, RATE_LIMIT_ANON_PER_MINUTE: '' })).toThrowError(ConfigError)
   })
 
   it('coerces PORT from its string form', () => {

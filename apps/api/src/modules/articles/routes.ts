@@ -1,6 +1,7 @@
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod'
 import { requireAdmin } from '../auth/guards.js'
 import { requireCsrfHeader } from '../../plugins/auth.js'
+import { requireWriteRateLimit } from '../../plugins/rateLimit.js'
 import {
   AdminArticlePageSchema,
   AdminListQuerySchema,
@@ -92,21 +93,27 @@ export const articleRoutes: FastifyPluginAsyncZod = async (app) => {
   )
 
   /**
-   * All three writes share one onRequest hook pair, and the ordering is load-bearing.
+   * All four writes share one onRequest triple, and the ordering is load-bearing.
    *
    * `requireAdmin` runs first, so an unauthenticated call gets 401 and a
    * logged-in non-admin gets 403 *before* the CSRF header is even consulted — the
-   * CSRF check is the last line, not a substitute for authorisation.
+   * CSRF check is not a substitute for authorisation.
    *
    * `requireCsrfHeader` is attached to PATCH and DELETE, not just POST: design §5
    * flags "CSRF only on POST" as the easy mistake, but a state-changing request is
    * state-changing whichever verb carries it, and a cross-site form can drive
    * PUT/DELETE-style requests once the token is a cookie the browser auto-attaches.
+   *
+   * `requireWriteRateLimit` is last, and that position is chosen rather than
+   * default: it needs `request.auth`, which only the guard ahead of it fills in
+   * (S6-R2), and it should not spend a caller's quota on a request that was going
+   * to be refused for free two hooks earlier. A 401 or a CSRF 403 therefore costs
+   * the limiter nothing; only a request that was really going to write is counted.
    */
   app.post(
     '/api/v1/articles',
     {
-      onRequest: [requireAdmin, requireCsrfHeader],
+      onRequest: [requireAdmin, requireCsrfHeader, requireWriteRateLimit],
       schema: {
         body: CreateArticleSchema,
         response: { 201: ArticleAdminSchema },
@@ -130,7 +137,7 @@ export const articleRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
     '/api/v1/articles/import',
     {
-      onRequest: [requireAdmin, requireCsrfHeader],
+      onRequest: [requireAdmin, requireCsrfHeader, requireWriteRateLimit],
       bodyLimit: IMPORT_BODY_LIMIT_BYTES,
       schema: {
         body: ImportArticlesSchema,
@@ -143,7 +150,7 @@ export const articleRoutes: FastifyPluginAsyncZod = async (app) => {
   app.patch(
     '/api/v1/articles/:slug',
     {
-      onRequest: [requireAdmin, requireCsrfHeader],
+      onRequest: [requireAdmin, requireCsrfHeader, requireWriteRateLimit],
       schema: {
         params: SlugParamsSchema,
         body: UpdateArticleSchema,
@@ -156,7 +163,7 @@ export const articleRoutes: FastifyPluginAsyncZod = async (app) => {
   app.delete(
     '/api/v1/articles/:slug',
     {
-      onRequest: [requireAdmin, requireCsrfHeader],
+      onRequest: [requireAdmin, requireCsrfHeader, requireWriteRateLimit],
       schema: {
         params: SlugParamsSchema,
       },
