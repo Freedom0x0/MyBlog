@@ -158,32 +158,25 @@ curl -s -X POST localhost:3001/api/v1/articles -d '{...}'   # 无 token → 401
 
 ## S4 · 前端迁移 + 门户 hub
 
-**产出**：门户 hub 上线；文章模块走 Next.js；SEO 生效；D7 修复；设计令牌层抽出来。
+**状态：完成于 2026-10-08（收窄版）**，任务 `10-08-s4-nextjs-public-pages`。范围按上面的 **P-1/P-2** 裁定执行——做 Next.js 公开页 + ISR + SEO，**不做**门户 hub 与模块注册表。逐段证据与两条"没测到"的实话在该任务的 `implement.md` 末尾结论表。
 
-- [ ] `apps/web` 迁到 Next.js App Router
-- [ ] **首页改造成门户 hub**：上半部模块卡片、下半部最新文章摘要；文章列表移到 `/blog`（Q10）
-- [ ] 模块注册表（`design.md` §3.2 的类型，含 `embed` 字段）+ 首页渲染注册表
-- [ ] **抽出设计令牌层**（`design.md` §3.5）：把现有 `index.css` 的 HSL 变量整理为规范令牌，同时产出 tokens JSON。这是 R17 的落地物，S5 交给 agent 消费
-- [ ] 文章列表 / 详情用 **SSG + ISR**，按需 revalidate
-- [ ] SEO：`generateMetadata` 输出 title/description/OG；`sitemap.xml`；`robots.txt`；RSS
-- [ ] 修复 D7（`<title>My Trae Project</title>` 与零 meta）；修复 D3（`Projects.tsx` 死代码与不存在的 `skin` 色板）
-- [ ] 个人信息模块落地
-- [ ] 修复 D2：移除 `vite-plugin-trae-solo-badge`（迁到 Next.js 后自然消失，需确认产物中无残留）
-- [ ] 修复 D8：评论嵌套 UI
-- [ ] Playwright 覆盖门户关键路径
+**这一段的立项理由被重新量过，不是引用旧结论**：`curl` 一个真实公开文章 URL，服务端返回 **841 字节**、`<div id="root">` 为空、正文关键词命中 **0**；迁完之后同一 URL 是 **20302 字节**、正文标题在 HTML 里。爬虫与链接预览读的正是这些字节。
 
-**验证**：
+- [x] `apps/web` 迁到 Next.js App Router —— **仅公开页**。新 app 是 `apps/web-next`（Next 16.3.8 + React 19），`/` 与 `/blog/[slug]` 在此；**`/admin/*` 三条留在 Vite SPA**（P-2：服务端渲染管理页要转发会话 cookie，而其唯一收益 SEO 对登录页恒为 0）
+- [ ] **首页改造成门户 hub**（上半模块卡片 / 下半最新文章）、文章列表移到 `/blog` —— **经 P-1 延后**，规格留在 `design.md` §3.2 不删。触发条件：出现第二个需要被门户承载的独立应用
+- [ ] 模块注册表（含 `embed`）+ 首页渲染注册表 —— **经 P-1 延后**，同上
+- [x] **抽出设计令牌层** —— `packages/design-tokens`（`tokens.css` + `tailwind-preset`，无构建步骤），两个 app 共用；产物 CSS 与重构前**同名同哈希同字节**
+- [x] 文章列表 / 详情用 **SSG + ISR**，按需 revalidate —— `revalidate = 60`（D-4 的数字，不是"最终一致"这种没有数字的说法）
+- [x] SEO：`generateMetadata`、`sitemap.xml`、`robots.txt`、RSS —— 实测 sitemap `<loc>` = 7（6 篇 published + 首页），草稿 0 命中；RSS 6 个 `<item>`；两者均被 XML 解析器接受
+- [x] 修复 D7（`<title>`）与 D3（`Projects.tsx` 死代码）—— **实测这两条在 S3 期间已不存在**，本阶段没有"修"它们，只是不再把它们当工作量
+- [x] 修复 D2（`vite-plugin-trae-solo-badge`）—— 同样实测 0 命中，已不在
+- [ ] **个人信息模块落地** —— 属门户形状的东西，**经 P-1 延后**（现在的首页已有自我介绍段落）
+- [x] 修复 D8：评论嵌套 UI —— 已在 S3 的空库走查里做完（`buildCommentTree` + 扁平渲染缺陷修复）
+- [x] Playwright 覆盖门户关键路径 —— **改写成覆盖博客公开页的三条**（首页正文 / 详情正文与 og:title / sitemap 条目数），全部断言在**原始响应字节**上而非水合后的 DOM；CI 里**故意不装浏览器**（实测无浏览器也全绿），触发条件写在 ci.yml 注释里
 
-```bash
-npm run build && npm start
-curl -s localhost:3000/ | grep -c '模块'                    # 首页是 hub 而非文章列表
-curl -s localhost:3000/blog | head                          # 文章列表已移到这里
-curl -s localhost:3000/blog/<slug> | grep -o '<meta property="og:title"[^>]*>'
-curl -s localhost:3000/sitemap.xml | head
-# 查看页面源码确认正文 HTML 存在（非空 div）
-```
+**新增的一条安全结论**（原计划里没有，是这一段的意外收获）：`rehype-sanitize` 此前**只挂在编辑器的预览上**，公开的 `<ReactMarkdown>` 从未挂过。今天它还不至于被利用（全仓没有 `rehype-raw`，原始 HTML 不会变成 DOM），但"今天不可利用"不等于"有防护"——现在这道闸第一次真正跑在对外提供内容的那条路径上，并且是在 **SSR 字节**上验的（恶意载荷五类命中全 0，同时有阳性对照证明不是"页面空了所以 0"）。
 
-**风险/回滚**：这是最大的一次性改动。做法：Next.js 版本与 Vite 版本**并行存在一段时间**，按页面逐个切换，不做大爆炸式替换。
+**风险/回滚**：两个前端并行，靠令牌单一来源压住视觉漂移面；`apps/web-next` 出问题可以先让 nginx 把公开路径继续指回 Vite SPA（S5 的反代是这条路的前提）。
 
 ---
 
