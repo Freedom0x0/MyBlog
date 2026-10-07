@@ -107,6 +107,20 @@ jobs:
         # so CI never silently resolves different versions than development.
         run: pnpm install --frozen-lockfile
 
+      # apps/web-next's Playwright suite (S4-e) deliberately does NOT install browsers
+      # here. All three tests assert on raw HTTP response bodies through Playwright's
+      # `request` fixture and never launch a page — measured, not assumed: the suite
+      # stays green with `PLAYWRIGHT_BROWSERS_PATH` pointed at an empty directory.
+      # A ~150 MB download plus apt shared libraries on every run, bought for a test
+      # that does not exist yet, is the kind of step this project does not add on
+      # speculaton.
+      #
+      # Trigger condition, so the next person does not have to rediscover it: the day a
+      # spec calls `page.goto`/`page.content()`, add
+      # `pnpm --filter web-next exec playwright install --with-deps chromium` back
+      # before the e2e step — `--with-deps` is required, because without the Ubuntu
+      # shared libraries the browser downloads happily and then cannot start.
+
       - name: Lint
         run: pnpm -r lint
 
@@ -185,11 +199,38 @@ jobs:
       - name: Test
         # --if-present because not every package has tests yet (apps/web has
         # none until S4), and a missing script is not a failure.
+        #
+        # This stays the unit/integration step on purpose. apps/web-next's Playwright
+        # suite is not picked up here because its script is `test:e2e`, not `test`:
+        # it needs `next build` output and two live processes, so running it alongside
+        # vitest would make every `pnpm -r test` depend on a build. It has its own step
+        # after Build, below. Renaming it to `test` would fold it into this line and
+        # slow every run — do not do that without meaning to.
         run: pnpm -r --if-present test
 
       - name: Build
         # Production artifacts must build in CI, not only on a developer machine.
         run: pnpm -r build
+
+      # After Build, twice over: this step starts `next start` (which serves `.next`)
+      # and `node dist/server.js` (which serves `apps/api/dist`), and
+      # `apps/web-next/playwright.config.ts` throws with instructions if either is
+      # missing rather than building it silently — a harness that rebuilt on its own
+      # would let a broken Build step look green.
+      #
+      # No `env:` block here. The step inherits the job-level variables, and that is
+      # how the API process is configured in CI: there is no `apps/api/.env` on a
+      # runner (it is git-ignored, and its local absence is what the `--env-file=.env`
+      # branch in that config exists for). Nothing in this workflow copies a credential
+      # into a tracked file; the job-level values are the CI stand-ins the API's own
+      # config validation accepts.
+      #
+      # The config starts the API on 127.0.0.1:3001 and `next start` on 127.0.0.1:3000.
+      # Neither collides with the services this job publishes (6379, 5432, 9000), and
+      # `reuseExistingServer: false` on the Next entry means a port already in use is a
+      # loud error rather than a test against somebody else's process.
+      - name: End-to-end (apps/web-next public pages)
+        run: pnpm --filter web-next test:e2e
 
       # Server-side secrets must never reach the browser bundle. A value only
       # becomes dangerous if some module reads it as a VITE_/NEXT_PUBLIC_ variable,

@@ -23,6 +23,13 @@ next-env.d.ts
 # Vercel
 .vercel
 
+# Playwright run output for apps/web-next's e2e suite (stage S4-e). Scoped to that
+# package on purpose: a bare `test-results/` line would ignore any future directory of
+# that name in another app. `playwright-report/` is the HTML report the config's `html`
+# reporter writes, `test-results/` the per-test attachments (outputDir in the config).
+apps/web-next/playwright-report/
+apps/web-next/test-results/
+
 # Supabase local
 .supabase
 
