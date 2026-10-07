@@ -8,9 +8,11 @@
 
 ## 前置
 
-- [ ] `git tag pre-s3`
-- [ ] `pnpm infra:up`；库已迁移到 0003 且 seed 过
-- [ ] **确认约束**：`feat/s0-foundation` 不合 `main`（见 prd 前置认知）
+> 2026-10-08 补勾。这三条在做 S3 之前就已成立，只是当时忘了回来打勾——补的是记录，不是工作。
+
+- [x] `git tag pre-s3` —— 标签实测存在（`git tag --list 's3*' pre-s3` 现回 `pre-s3`、`s3-a`、`s3-detached-from-supabase`、`s3-done`）
+- [x] `pnpm infra:up`；库已迁移到 0003 且 seed 过 —— 收尾当天 `/ready` 回 `200`、`checks` 内 postgres/redis 均 ok，库停在 `articles 7 / comments 2` 的 seed 基线
+- [x] **确认约束**：`feat/s0-foundation` 不合 `main`（见 prd 前置认知）—— 全程遵守，收尾时 HEAD 仍在 `feat/s0-foundation`
 
 ---
 
@@ -119,7 +121,7 @@ CLI 方案作废的理由与取舍记在 design §3；这里只留可执行的�
 
 Supabase 里的既有文章直接废弃，不导出、不核对、不搬。因此 D 切换完成后，站点的真实内容数量是 **0**，第一篇必须来自编辑器手写或 C 的导入端点——这是决定的后果，不是缺陷，但要知道它长什么样：切完那天首页是空的。
 
-- [ ] 定一下 `apps/api/fixtures/` 那些演示文章（`normal-published`、`draft-unpublished`、`backslashes` 等 7 篇）的处置：它们是 seed 与测试的数据来源，**不能删**；但生产环境不该有它们。`seed.ts` 已经拒绝在 `NODE_ENV=production` 下跑，所以只要部署流程里不调 seed 就没有泄漏——在 S8 的部署清单上记一笔"不要跑 seed"即可。
+- [x] 定一下 `apps/api/fixtures/` 那些演示文章（`normal-published`、`draft-unpublished`、`backslashes` 等 7 篇）的处置：它们是 seed 与测试的数据来源，**不能删**；但生产环境不该有它们。**这条已经由代码守住而不是由流程记住**——实测 `seed.ts:82-83` 在 `NODE_ENV=production` 下 `throw SeedError('Refusing to seed NODE_ENV=production — this is development data.')`，所以部署流程里就算有人顺手跑 seed 也不会污染生产。原计划说"在 S8 的部署清单上记一笔"，但靠人记得的开关正是会漏的那种；代码这道闸更强，S8 清单仍会写一条"生产不调 seed"作为第二层。
 
 ---
 
