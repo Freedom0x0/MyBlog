@@ -7,6 +7,7 @@ import type {
   ArticleStatus,
   ArticleSummary,
   CreateArticleInput,
+  ExportedBlog,
   ImportArticleFile,
   ImportArticlesResponse,
   UpdateArticleInput,
@@ -131,4 +132,82 @@ export async function importArticles(
   files: ImportArticleFile[],
 ): Promise<ImportArticlesResponse> {
   return apiPost<ImportArticlesResponse>('/articles/import', { files })
+}
+
+/**
+ * ── The way out (S8-a) ────────────────────────────────────────────────────────
+ *
+ * `GET /api/v1/admin/articles/export` as a saved file.
+ *
+ * **fetch+blob through {@link apiGet}, not an `<a href>` to the API** — and the four
+ * reasons are all properties of this app, not taste:
+ *
+ * 1. `apiClient.ts` is the only module in `apps/web` that calls `fetch`, and it is the
+ *    only one that attaches the session. A hand-written link would be a second
+ *    transport with its own — smaller — set of guarantees, and the header comment there
+ *    is explicit that the next exception has to be argued for, not assumed.
+ * 2. The download has to survive the failure cases. A `<a href>` that gets a 401 or a
+ *    403 *navigates the admin page to the JSON error envelope*: the list disappears and
+ *    the person reads `{"error":{"code":"UNAUTHORIZED",…}}` in the address bar instead
+ *    of the 中文 message every other screen in this app shows through
+ *    {@link describeApiError}.
+ * 3. In development the API is a **different origin** (`VITE_API_BASE_URL` defaults to
+ *    `http://localhost:3001` while the SPA runs on 5175). The `download` attribute is
+ *    ignored cross-origin, so a link would navigate or open a tab rather than save —
+ *    exactly the case where the button is used most.
+ * 4. Session, not cookie: the API's `requireAuth` accepts the bearer only from an
+ *    `Authorization` header or the `portal_access` cookie. Whether the cookie is even
+ *    attached to a top-level cross-site navigation depends on `COOKIE_SECURE` and
+ *    SameSite, so a link's success would depend on the deployment shape. `apiGet` sends
+ *    `credentials: 'include'`, which works in both.
+ *
+ * What that buys, and its price: the whole document is held three times — the parsed
+ * object, the re-serialised string, the Blob — instead of streaming to disk. At the size
+ * this endpoint returns today (125,159 bytes on the wire for the whole seeded blog,
+ * measured) that is nothing, and it is the same buffering trade the server documents in
+ * `exportAll`. If the blog ever grows past a few hundred articles, the fix is on both
+ * sides at once (a streamed response and no client-side re-parse), not a
+ * `window.location` assignment.
+ *
+ * `exportedAt` is the filename's only input, which is why it cannot be an article's
+ * slug or title: a download name assembled from stored user text is the same class of
+ * mistake as an object key assembled from an uploaded file's name.
+ */
+export async function downloadBlogExport(): Promise<{ files: number; bytes: number }> {
+  const doc = await apiGet<ExportedBlog>('/admin/articles/export')
+
+  const blob = new Blob([JSON.stringify(doc)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+
+  /**
+   * A detached anchor rather than `window.open`: a navigation would replace the list
+   * this button sits on, and the person is about to import those files back into it.
+   * Appended first because Firefox does not fire `click()` on a detached element.
+   */
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = exportFilename(doc.exportedAt)
+  document.body.append(anchor)
+  anchor.click()
+  anchor.remove()
+  // Released on the next turn rather than immediately: the download is queued by the
+  // click, and revoking the object URL in the same tick can beat it.
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+
+  return { files: doc.articles.length, bytes: blob.size }
+}
+
+/**
+ * `myblog-export-2026-10-08.json`, from the server's own `exportedAt`.
+ *
+ * The UTC calendar day, which is the same rule `buildExportFilename` uses in the API —
+ * so the name the browser saves matches the `Content-Disposition` the very same response
+ * carries, and a backup pulled with `curl` and one pulled from this button differ in
+ * nothing that matters. It is a *copy* of that rule rather than a read of the header,
+ * because {@link apiGet} returns the parsed body and headers are not the business of this
+ * layer; if the server's naming ever changes, this file's name changes with it and the
+ * header remains authoritative for every other client.
+ */
+function exportFilename(exportedAt: string): string {
+  return `myblog-export-${new Date(exportedAt).toISOString().slice(0, 10)}.json`
 }

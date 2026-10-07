@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Edit, Plus, Send, Trash2 } from 'lucide-react';
+import { Download, Edit, Plus, Send, Trash2 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
-import { deleteArticle, listAdminArticles, updateArticle } from '../utils/articlesApi';
+import { deleteArticle, downloadBlogExport, listAdminArticles, updateArticle } from '../utils/articlesApi';
 import { describeApiError } from '../lib/apiClient';
 import ImportMarkdownPanel from '../components/ImportMarkdownPanel';
 import type { AdminArticleSummary, ArticleStatus } from 'shared';
@@ -15,9 +15,13 @@ import type { AdminArticleSummary, ArticleStatus } from 'shared';
  * `/admin/articles/:slug/edit`, and the second one requires knowing the slug
  * (S3-R20~R22). So this page's job is exactly "the exit of the admin read
  * endpoints" — title, slug, status, last updated, plus 编辑 / 发布 / 删除 per row.
- * Deliberately absent: search, bulk actions, sort switching, previews, status
+ * Deliberately absent: search, bulk row actions, sort switching, previews, status
  * tabs. The API accepts a `status` filter, and it is not used here because the
  * plan does not ask for it.
+ *
+ * One action is not about a row at all: 下载导出 (S8-a), sitting under the import
+ * panel it pairs with. It is the only way anything on this screen can leave the
+ * database, which since S3 is the only copy of the writing.
  *
  * Two data facts the UI has to respect:
  * - list rows carry **no `content`** (`AdminArticleSummary` = `ArticleAdmin` minus
@@ -78,6 +82,7 @@ export default function AdminArticleList() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingAction>(null);
+  const [exporting, setExporting] = useState(false);
 
   /**
    * Reload from page one.
@@ -173,6 +178,32 @@ export default function AdminArticleList() {
     }
   };
 
+  /**
+   * 下载导出 = `GET /api/v1/admin/articles/export`, saved by the browser.
+   *
+   * One click, no confirm: it writes nothing, so there is nothing to undo — the
+   * warning that belongs on this action is the one in the copy under the button
+   * ("this is the only copy"), not a dialog. Failures go to the same `actionError`
+   * band the row actions use, because a 401 here (session ended) has to read like the
+   * rest of this page rather than like a browser error page.
+   *
+   * The list is not reloaded afterwards: an export cannot change a row, and a reload
+   * would throw away the notice the person is still reading.
+   */
+  const handleExport = async () => {
+    setExporting(true);
+    setActionError(null);
+    setNotice(null);
+    try {
+      const { files, bytes } = await downloadBlogExport();
+      setNotice(`已导出 ${files} 篇文章（约 ${Math.round(bytes / 1024)} KiB），浏览器应已开始保存。`);
+    } catch (error) {
+      setActionError(describeApiError(error, '导出失败，请重试。'));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   if (!isAdmin) {
     return (
       <div className="min-h-screen bg-background text-foreground flex items-center justify-center px-4">
@@ -217,6 +248,33 @@ export default function AdminArticleList() {
         {/* The import button lives on this page — it produces rows for this list, and
             the article detail page has no business creating articles. */}
         <ImportMarkdownPanel onImported={() => void reload()} />
+
+        {/**
+         * 下载导出 sits directly under the import panel because the two are one pair:
+         * the file this button saves is the file that panel reads back, article for
+         * article. The copy says what the export is *not* — comments and uploaded
+         * images are not in it, and an import always lands a draft — because a backup
+         * whose limits are unknown is a backup nobody trusts until the day it is needed.
+         */}
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-4">
+          <div>
+            <div className="text-sm font-medium">导出整站文章</div>
+            <div className="text-xs text-muted-foreground">
+              一个 JSON 文件，每篇文章都是导入所用的那份 Markdown（含 front-matter），
+              草稿与已归档都在里面。<b>只含文章</b>：评论与已上传的图片不在其中。
+              导回走上面的「导入 Markdown」，回来的每一篇都是草稿。
+            </div>
+          </div>
+          <button
+            onClick={() => void handleExport()}
+            disabled={exporting}
+            title="GET /api/v1/admin/articles/export — 读操作，不写任何东西"
+            className="flex items-center gap-2 px-4 py-2 bg-secondary text-secondary-foreground rounded-md text-sm font-medium hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Download className="w-4 h-4" />
+            {exporting ? '导出中...' : '下载导出'}
+          </button>
+        </div>
 
         {loadError && (
           <div className="mb-4 text-sm px-4 py-2 rounded-md bg-red-500/10 text-red-600 border border-red-500/30">

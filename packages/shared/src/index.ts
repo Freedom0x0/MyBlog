@@ -298,6 +298,58 @@ export interface ImportArticlesResponse {
 }
 
 /**
+ * ── Markdown export (`GET /api/v1/admin/articles/export`) ──────────────────────
+ *
+ * The way out, paired with the import above.
+ *
+ * One entry of the export is `ImportArticleFile` **by reference, not by copy** —
+ * which is the design requirement written where a compiler can enforce it. The
+ * export document's `articles` array is literally the type of the import body's
+ * `files` array, so the file this endpoint produces goes into
+ * `POST /api/v1/articles/import` with no translation, and any future change to the
+ * import's per-file shape lands on the export at the same moment. A backup format
+ * that needs a converter to feed your own writer is how a project ends up with a
+ * manual restore script, and a restore script is not a backup.
+ *
+ * What travels is therefore *rendered markdown with front-matter* rather than
+ * structured fields: the import parses server-side and writes through the one
+ * create path (design §3), so structured fields here would need re-rendering into
+ * markdown on the way back in — a second parser, which is exactly what S3-R8
+ * refuses.
+ *
+ * Scope, stated because a backup that silently omits half the data is worse than no
+ * backup: this is the **writing** only. Comments, users and the media objects the
+ * bodies and `coverImage` URLs point at are not in here, and no import endpoint can
+ * take them back (see the export route's own comment and the S8 notes).
+ */
+export type ExportedArticleFile = ImportArticleFile
+
+/**
+ * The whole blog as one JSON document.
+ *
+ * `version` is a literal rather than an open `number` so a future format change is
+ * a type error at every reader instead of a silent reinterpretation — and because
+ * the reader that matters (a restore run) has to be able to refuse a document it
+ * does not understand rather than half-import it.
+ *
+ * `exportedAt` is the server's clock at the moment of generation. It is the one
+ * field that makes two exports of an unchanged database differ as *documents*; the
+ * `articles` sequence beneath it is ordered deterministically so the part anyone
+ * would diff stays stable (see the route's comment).
+ *
+ * `articles` carries every article in every status, including drafts, ordered by
+ * `published_at desc nulls last, slug`. Not reusing the admin list's order is
+ * deliberate: that one sorts by "last changed" for a screen, while this one needs a
+ * sort that only changes when the writing changes, so a restore and a re-export
+ * produce a readable diff instead of 300 reordered entries.
+ */
+export interface ExportedBlog {
+  version: 1
+  exportedAt: string
+  articles: ExportedArticleFile[]
+}
+
+/**
  * ── Uploads (S3 stage F, design §4.2) ───────────────────────────────────────
  *
  * Four shapes for two calls, because a browser cannot be trusted with either the

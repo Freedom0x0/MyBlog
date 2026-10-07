@@ -9,6 +9,8 @@ import type {
   ArticleSummary,
   AssertEquivalent,
   CreateArticleInput,
+  ExportedArticleFile,
+  ExportedBlog,
   ImportArticlesRequest,
   ImportArticlesResponse,
   UpdateArticleInput,
@@ -330,3 +332,74 @@ export const IMPORT_RESPONSE_MATCHES_CONTRACT: AssertEquivalent<
   z.infer<typeof ImportArticlesResponseSchema>,
   ImportArticlesResponse
 > = true
+
+// ── Markdown export (S8-a) ─────────────────────────────────────────────────────
+
+/**
+ * One exported file, shaped for the response only.
+ *
+ * **This deliberately re-declares `ImportArticleFileSchema`'s shape instead of
+ * reusing it, and the reason is a trap worth recording.** fptz serializes responses
+ * with zod's `safeEncode` (verified against the installed
+ * `fastify-type-provider-zod@7`: `dist/esm/core.js` runs
+ * `safeEncode(schema, data)` and throws `ResponseSerializationError` on an error),
+ * and `safeEncode` applies *checks*, not merely field selection — measured on this
+ * tree, a `refine` on a string field fails an encode exactly as it fails a parse.
+ * Reusing the import's DTO here would therefore apply the import's write-path
+ * ceilings to the backup: any article whose rendered file passes
+ * `IMPORT_MAX_MARKDOWN_BYTES` (128 KiB) would answer 500, on the one endpoint a
+ * person reaches for after everything else has already failed. The margin is not
+ * hypothetical — this repository's own `fixtures/oversized.md` renders at 117,887
+ * bytes, which sits 13 KiB under that line.
+ *
+ * Those ceilings defend a hand resting on the file picker (design §3.2); they say
+ * nothing about what may be stored, and a backup has to be able to carry everything
+ * the store holds. The shape symmetry that makes this file re-importable is carried
+ * by the shared interfaces and their drift guards below, which is where it belongs:
+ * identical *fields*, independently chosen *limits*.
+ *
+ * `markdown` keeps `min(1)` because that is a genuine invariant rather than a copied
+ * ceiling: `content_md` is `not null` and the rendered block always opens with the
+ * `---` front-matter delimiters, so an empty string here can only mean a bug in the
+ * renderer.
+ */
+export const ExportedArticleFileSchema = z.object({
+  name: z.string().min(1),
+  markdown: z.string().min(1),
+})
+
+/**
+ * Body of `GET /api/v1/admin/articles/export` — the way out, paired with the import
+ * above.
+ *
+ * `version` is `z.literal(1)`, not `z.number()`: a reader that cannot claim the
+ * document it is holding should refuse it, and a bare number would let a future
+ * v2 be accepted as a v1 by anything that forgot to look.
+ *
+ * Note what is *not* bounded here. `bodyLimit` governs request bodies only, so no
+ * Fastify setting constrains this response; the practical ceiling and the reasoning
+ * about buffering live in the route's comment, where the response is actually
+ * written.
+ */
+export const ExportedBlogSchema = z.object({
+  version: z.literal(1),
+  exportedAt: z.iso.datetime(),
+  articles: z.array(ExportedArticleFileSchema),
+})
+
+/**
+ * The symmetry, enforced where it counts. `ExportedBlog.articles` is typed
+ * `ImportArticleFile[]` in `shared`, so this guard passing means the response's
+ * per-file fields are exactly the import body's per-file fields — a rename or a new
+ * required field on either side stops compiling.
+ */
+export const EXPORT_MATCHES_CONTRACT: AssertEquivalent<
+  z.infer<typeof ExportedBlogSchema>,
+  ExportedBlog
+> = true
+
+export const EXPORT_FILE_MATCHES_CONTRACT: AssertEquivalent<
+  z.infer<typeof ExportedArticleFileSchema>,
+  ExportedArticleFile
+> = true
+

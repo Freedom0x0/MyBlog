@@ -6,6 +6,8 @@ import {
   type ArticlePage,
   type ArticleStatus,
   type CreateArticleInput,
+  type ExportedArticleFile,
+  type ExportedBlog,
   type ImportArticleFile,
   type ImportArticleResult,
   type ImportArticlesResponse,
@@ -171,6 +173,74 @@ export class ArticleService {
     }
 
     return toArticleAdmin(found)
+  }
+
+  // ── admin export (S8-a) ─────────────────────────────────────────────────────
+
+  /**
+   * The whole blog, in every status, as one JSON document the import can read.
+   *
+   * **Format: one JSON document, not a tarball** — argued from the import DTO rather
+   * than from taste. `POST /api/v1/articles/import` takes
+   * `{ files: [{ name, markdown }] }` as a JSON body, so the export's `articles` array
+   * is that same body's array field: the document is *already* in the only shape the
+   * restore path consumes, and no untar-and-loop step exists to get wrong. A tar of
+   * `<slug>.md` files would be the more familiar backup shape and would need either a
+   * new dependency (tar has no stdlib writer) or a hand-rolled ustar writer, and then
+   * the restore becomes "untar, then POST each file" — a manual step, which is exactly
+   * the thing a backup endpoint is supposed to remove. JSON also survives the two
+   * transports this project actually uses: FinalShell downloads it, `jq` reads it, and
+   * `curl -s ... | jq '.articles[] | select(.name=="x.md") | .markdown' > x.md` is the
+   * one-line single-article recovery.
+   *
+   * **Buffered, not streamed, and the reason is the error envelope.** If rendering or
+   * serialization throws after the response has begun, the caller holds a 200 with half
+   * a document — a truncated backup is the worst possible failure of this endpoint,
+   * because it is only discovered at restore time, which is the moment there is no
+   * other copy. Buffering means a failure is an ordinary
+   * `{error:{code,message,requestId}}` and no file at all. It also keeps the response
+   * inside the drift-guarded DTO: fptz serializes whole responses, so streaming would
+   * mean bypassing `ExportedBlogSchema` and its guards.
+   *
+   * **The practical ceiling, measured on this tree rather than guessed.** Fastify's
+   * default `bodyLimit` (1 MiB) governs *request* bodies only, so nothing about this
+   * response is constrained by configuration. Three numbers, all from running the real
+   * `renderArticleMarkdown` + `ExportedBlogSchema` encode + `JSON.stringify` path (with
+   * `node --expose-gc`, against `dist/`):
+   * - **Today — 7 articles, 120,506 bytes of rendered markdown → 125,159 bytes on the
+   *   wire**, i.e. +3.8%. Escaping is *not* the multiplier it looks like in the import's
+   *   `bodyLimit` arithmetic: `JSON.stringify` leaves non-ASCII alone, and this corpus is
+   *   mostly CJK prose with few quotes per kilobyte. End-to-end response time in the
+   *   suite is 10-16 ms per call.
+   * - **500 articles at a realistic 5 KiB mean — 2.8 MiB of markdown, 2.8 MiB on the
+   *   wire, ~3 ms encode + ~15 ms stringify, +9.4 MiB of heap.** Five hundred posts is
+   *   far past what this blog holds and it costs fifteen milliseconds.
+   * - **500 articles the size of `fixtures/oversized.md` — 64.8 MiB of markdown,
+   *   64.9 MiB on the wire, ~330 ms of `JSON.stringify`, +203 MiB of heap.**
+   *
+   * So the ceiling is neither size alone nor time alone: the 65 MiB case is one
+   * synchronous block on the event loop — every other in-flight request, `/health`
+   * included, waits behind the backup for a third of a second — *and* a 200 MiB transient
+   * in a process that also holds a `pg` pool. The realistic case is two orders of
+   * magnitude under both. The condition that reopens this is a database whose article
+   * text totals tens of MiB, at which point the answer is a streaming format (NDJSON, or
+   * a tar written by a job) *plus* dropping the response DTO — giving up the "the file is
+   * already the import body" property this endpoint exists for, which is why it is
+   * recorded rather than built now.
+   *
+   * `exportedAt` is the one field that makes two exports of an unchanged database
+   * differ, deliberately: it says when the copy was taken, which is the first thing
+   * anyone wants to know about a backup. Everything below it is ordered deterministically
+   * (see `listAllForExport`) so the part a person would diff stays stable.
+   */
+  async exportAll(): Promise<ExportedBlog> {
+    const rows = await this.repository.listAllForExport()
+
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      articles: rows.map(toExportFile),
+    }
   }
 
   // ── admin write path ────────────────────────────────────────────────────────
@@ -418,6 +488,149 @@ function toDraftInput(file: ImportArticleFile): PreparedDraft {
   }
 
   return { name: file.name, input: validated.data }
+}
+
+/**
+ * The downloaded file's name prefix, kept separate so the shape of the name has one
+ * definition — see `buildExportFilename` for what may and may not be interpolated
+ * into it.
+ */
+export const EXPORT_FILENAME_PREFIX = 'myblog-export-'
+
+/**
+ * Front-matter timestamp: ISO-8601 in UTC, with a whole second written as a whole
+ * second.
+ *
+ * `2026-09-20T10:00:00.000Z` and `2026-09-20T10:00:00Z` name the same instant and
+ * `parseFixture` accepts both (it stores the text and the import then ignores it), so
+ * nothing here is about validity. It is about the exported file being diffable against
+ * the local `.md` originals — which is the reason the export format was chosen to match
+ * `fixtures/*.md` byte for byte. Only a *zero* millisecond part is trimmed, so a publish
+ * stamped by `now()` keeps its `.595Z` rather than being silently rounded away.
+ */
+function formatFrontMatterTimestamp(iso: string): string {
+  return iso.replace(/\.000Z$/, 'Z')
+}
+
+/**
+ * Render one stored article back into the markdown file it came from.
+ *
+ * **The format is `parseFixture`'s, because that function is the only reader this
+ * output has to satisfy** — `POST /api/v1/articles/import` parses with it and nothing
+ * else. Key order, the flat `key: value` lines, the `tags: [a, b]` form and the
+ * trailing `publishedAt` are copied from `fixtures/*.md` deliberately, and the export
+ * test asserts the result is byte-identical to those seven files. If this ever stops
+ * matching, the export stops being restorable through the project's own writer, which
+ * is the failure this whole endpoint exists to prevent.
+ *
+ * What is emitted, and what is pointedly not:
+ * - `status` and `publishedAt` **are** written even though an import cannot honour
+ *   them (`toDraftInput` drops both; import always lands a draft — S3-R9). Dropping
+ *   `status` is not an option, it is a *required* key of the format. Writing the true
+ *   value anyway is what makes the file a record rather than a draft-maker: a person
+ *   restoring by hand can see which articles were published and when, and re-publish
+ *   them with a `PATCH` per slug. The automated path does not read them, and the
+ *   route's comment states that out loud rather than leaving it to be inferred.
+ * - `updatedAt`, `id` and `views` are **not** written, and cannot be: `ALLOWED_KEYS`
+ *   in `db/frontmatter.ts` is a closed set and an unknown key is a hard
+ *   `FixtureError` — one extra line here would make *every* exported file
+ *   unimportable. `updatedAt` is the tempting one ("a backup should keep timestamps!")
+ *   and it is the trap. What is lost is the modification time only: `created_at` was
+ *   never readable through this API at all, and `updated_at` is re-set by the write
+ *   itself.
+ * - `coverImage` is omitted when null, matching the fixtures. `parseFixture` maps both
+ *   an absent key and the literal `null` to `null`, so the omission round-trips.
+ *
+ * Known fidelity limits, all of them properties of the flat format rather than of this
+ * function (each is pinned by a test in `articles-export.test.ts`):
+ * - a value containing a newline or leading/trailing whitespace cannot survive it —
+ *   the parser splits on the first `:` and trims, and a wrapped line is then "not a
+ *   'key: value' line". `CreateArticleSchema` bounds lengths but not characters, so a
+ *   `PATCH` can put a newline in a title and the export of that article re-imports as a
+ *   400. The value is written verbatim rather than escaped or altered: silently
+ *   rewriting a title would make the backup lie about what it holds.
+ * - a tag containing a comma re-reads as two tags, and brackets or a leading/trailing
+ *   space in any value shift it likewise.
+ * - a body starting with a newline loses exactly one of them, because the parser
+ *   strips a single leading newline after the closing delimiter.
+ * - a slug containing `/` or `\` produces a `name` the import's DTO refuses, and a slug
+ *   with a newline breaks the front-matter. Slug shape is not constrained by the write
+ *   DTO (only length), so this is a gap in the *write* rules, not something the export
+ *   can paper over.
+ */
+export function renderArticleMarkdown(record: ArticleRecord): string {
+  // Order = the fixtures' order. `content_md` is the body, not a key, so it is the
+  // part after the closing delimiter.
+  const lines = [
+    `slug: ${record.slug}`,
+    `title: ${record.title}`,
+    `excerpt: ${record.excerpt}`,
+    `category: ${record.category}`,
+    `tags: [${record.tags.join(', ')}]`,
+  ]
+
+  // Optional in the fixtures and optional here, in the column order the table itself
+  // uses (cover_image sits between tags and read_time): `parseFixture` maps an absent
+  // key and the literal `null` to the same `null`, so omitting a missing cover image
+  // round-trips and keeps the file shaped like the originals.
+  if (record.coverImage !== null) {
+    lines.push(`coverImage: ${record.coverImage}`)
+  }
+
+  lines.push(`readTime: ${record.readTime}`, `status: ${record.status}`)
+
+  // Trailing in the fixtures, so trailing here — and absent for a draft, which has no
+  // publication time to write (`publishedAt: null` would parse the same but claims
+  // something the row does not hold).
+  if (record.publishedAt !== null) {
+    lines.push(`publishedAt: ${formatFrontMatterTimestamp(record.publishedAt)}`)
+  }
+
+  // The body is appended byte-for-byte: no re-wrapping, no added or stripped trailing
+  // newline. `parseFixture` produced it from exactly this shape on the way in.
+  return `---\n${lines.join('\n')}\n---\n${record.contentMd}`
+}
+
+/**
+ * One stored article as one importable file.
+ *
+ * `name` is `<slug>.md` — the filename the person would have on disk, and the value
+ * the import pairs with its own `proposed`/conflict reporting. It is derived from a
+ * column that a write did fill from a request (`slug` is `CreateArticleInput.slug`), so
+ * it is not a secret-named server artefact; but it is also *only* ever an identifier
+ * here — nothing in the export path touches a filesystem with it, and the download's own
+ * filename comes from `buildExportFilename`, never from this string.
+ */
+function toExportFile(record: ArticleRecord): ExportedArticleFile {
+  return { name: `${record.slug}.md`, markdown: renderArticleMarkdown(record) }
+}
+
+/**
+ * `myblog-export-2026-10-08.json` — the name the browser saves the download as.
+ *
+ * Every character comes from the server's clock, and nothing comes from the request.
+ * That is the standing rule of this repository for anything that names a thing: the
+ * upload path issues `uploads/<utc-year>/<utc-month>/<random hex>.<sniffed extension>`
+ * (`buildUploadKey` in `modules/uploads/s3-store.ts`) and refuses to let a declared
+ * content type or filename choose a key or a path. Here the risk is lower — the string
+ * goes into a `Content-Disposition` header and thence to a *download* name, never to a
+ * path on the server — but a header value is still a string another machine will
+ * interpret, and the shape of the mistake is the same: user text becoming an identifier.
+ * A caller-controlled export name would also be a way to make a browser save over the
+ * operator's previous backup.
+ *
+ * UTC rather than the process's local zone, so the name does not depend on how the
+ * container's `TZ` happens to be set — the same choice `buildUploadKey` makes, and the
+ * reason it writes the month with `padStart(2, '0')` instead of using `toLocaleDateString`
+ * (a locale-dependent name is one nobody can script against). Because the alphabet is
+ * `[a-z0-9.-]` only, no RFC 5987 `filename*=` form is needed and none is emitted.
+ */
+export function buildExportFilename(now: Date): string {
+  const year = now.getUTCFullYear().toString().padStart(4, '0')
+  const month = String(now.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(now.getUTCDate()).padStart(2, '0')
+
+  return `${EXPORT_FILENAME_PREFIX}${year}-${month}-${day}.json`
 }
 
 function toArticleAdmin(record: ArticleRecord): ArticleAdmin {
