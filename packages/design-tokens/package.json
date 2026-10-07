@@ -1,0 +1,10 @@
+{
+  "name": "design-tokens",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./tokens.css": "./tokens.css",
+    "./tailwind-preset": "./tailwind-preset.cjs"
+  }
+}

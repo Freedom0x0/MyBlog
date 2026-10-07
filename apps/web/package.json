@@ -13,10 +13,10 @@
   "dependencies": {
     "@uiw/react-md-editor": "^4.0.11",
     "clsx": "^2.1.1",
+    "design-tokens": "workspace:*",
     "framer-motion": "^11.5.4",
     "gsap": "^3.12.5",
     "lucide-react": "^0.511.0",
-    "prism-react-renderer": "^2.4.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",

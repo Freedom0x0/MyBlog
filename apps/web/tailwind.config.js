@@ -1,44 +1,16 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: ["class"],
+  // Stays app-local on purpose: Tailwind scans these globs to decide which utilities
+  // to keep. A shared preset carrying another app's globs would scan the wrong files
+  // and silently purge classes this app actually renders.
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+  // The colour half of `theme.extend` lives in packages/design-tokens (the tokens the
+  // future public Next.js app has to share). Loaded through Tailwind's own `presets`
+  // mechanism; requires no build step.
+  presets: [require("design-tokens/tailwind-preset")],
   theme: {
     extend: {
-      colors: {
-        border: "hsl(var(--border))",
-        input: "hsl(var(--input))",
-        ring: "hsl(var(--ring))",
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
-        primary: {
-          DEFAULT: "hsl(var(--primary))",
-          foreground: "hsl(var(--primary-foreground))",
-        },
-        secondary: {
-          DEFAULT: "hsl(var(--secondary))",
-          foreground: "hsl(var(--secondary-foreground))",
-        },
-        destructive: {
-          DEFAULT: "hsl(var(--destructive))",
-          foreground: "hsl(var(--destructive-foreground))",
-        },
-        muted: {
-          DEFAULT: "hsl(var(--muted))",
-          foreground: "hsl(var(--muted-foreground))",
-        },
-        accent: {
-          DEFAULT: "hsl(var(--accent))",
-          foreground: "hsl(var(--accent-foreground))",
-        },
-        popover: {
-          DEFAULT: "hsl(var(--popover))",
-          foreground: "hsl(var(--popover-foreground))",
-        },
-        card: {
-          DEFAULT: "hsl(var(--card))",
-          foreground: "hsl(var(--card-foreground))",
-        },
-      },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
