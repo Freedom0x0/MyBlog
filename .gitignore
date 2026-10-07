@@ -33,3 +33,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# tsx compile cache, created when tsx cannot resolve a cache dir and builds the
+# path out of an undefined variable (the directory is literally named `undefined`).
+# Untracked 2026-10-07; the files are still on disk, they are just not history anymore.
+apps/api/undefined/
