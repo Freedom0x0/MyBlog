@@ -98,3 +98,24 @@ D 那组断言必须变红——否则 D 是假测试。
 - [ ] 残留：桶 0 对象；库 `articles 7 / comments 2`
 - [ ] 更新本文件勾选 + prd 验收，做不到的照实标 ⚠️（写"没测到"而不是"没问题"）
 - [ ] 父任务 `09-24-.../implement.md` 的 S4 段按**收窄后**的范围回写（原列表里 hub/注册表那几条要标"经 P-1 延后"，不删）
+
+---
+
+## 实测事实速查（brief 直接引用，别重新发现）
+
+| 事实 | 出处 |
+|---|---|
+| 迁移面：21 文件 / 3529 行 / 5 路由 | `apps/web/src`（`find` + `wc` 实测） |
+| 公开路由只有 `/` 与 `/blog/:slug`，**没有 `/blog` 列表页** | `apps/web/src/App.tsx:45,46` |
+| 后台三条留 Vite：`/admin/articles`、`/admin/articles/new`、`/admin/articles/:slug/edit` | `App.tsx:50,51,52` |
+| 令牌是 `:root`/`.dark` 里的裸 HSL 三元组，`index.css` 共 78 行 | `apps/web/src/index.css` |
+| Tailwind 以 `hsl(var(--x))` 消费，`darkMode: ['class']` | `apps/web/tailwind.config.js` |
+| 详情正文管线 `react-markdown@9` + `rehype-sanitize@6`，高亮 `react-syntax-highlighter@15.5.0` | `apps/web/package.json`、`pages/ArticleDetail.tsx` |
+| `MarkdownPreview`（`@uiw/react-md-editor`）只用于编辑器预览 | `pages/AdminArticleEditor.tsx` |
+| 死依赖 `prism-react-renderer@^2.4.0`：全仓 0 处代码引用 | 实测 grep |
+| **`ArticleDetail` 带 `content`** → 详情可纯服务端渲染 | `packages/shared/src/index.ts:108-110` |
+| **`ArticleSummary.publishedAt` 存在，但没有 `updatedAt`** → RSS `pubDate` 与 sitemap `lastmod` 只能用 `publishedAt` | `index.ts:97-105` |
+| 列表响应形状 `{data, next:{cursor}|null, limit}` | `index.ts:116`、`articles/schema.ts:46-50` |
+| D7/D3/D2 三个旧缺陷已不存在 | `index.html:7`＝`Guoshaoran`；`pages/Projects.tsx` 不在；badge 0 命中 |
+| API bind 写死 `127.0.0.1:3001`，且**不服务静态文件**（无 `@fastify/static`） | `apps/api/src/server.ts:53`、`app.ts` |
+| CI **没有 api 进程**（只有 postgres/redis/minio 服务） | `.github/workflows/ci.yml` steps 实测 |
