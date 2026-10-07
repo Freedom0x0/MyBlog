@@ -313,13 +313,13 @@ git tag s3-detached-from-supabase          # 里程碑标签
 
 **为什么要做这一块**：`AdminArticleEditor.tsx:180` 现在的"封面图"是一个**手填 URL 的文本框**——图片必须已经在某个地方可访问。一个走正规接口的博客不该靠人粘贴外链：图床搬了文章就裂，而且粘贴外部 URL 是 XSS 与追踪像素的入口。F 的全部意义就是把这个文本框换成真正的上传。
 
-- [ ] `POST /api/v1/uploads`（requireAdmin + CSRF）：入参 `contentType`/`size`
-- [ ] 校验：MIME 白名单、大小上限、**魔数嗅探在签发之后由 API 复核**（客户端声明可以撒谎）
-- [ ] key 由服务端随机生成，**绝不使用用户文件名**
-- [ ] presigned PUT 60 秒有效、单 key、带 `content-length-range`
-- [ ] 上传完成回调 `POST /api/v1/uploads/complete`：核实对象存在与真实类型，才返回可入库的 `publicUrl`
-- [ ] 启动期确保桶存在（不假设桶已在）
-- [ ] 前端：封面图字段旁加"上传"按钮（选文件 → 签发 → 直传 → 把返回的 `publicUrl` 填回字段）。字段仍可手填，不额外加限制——`cover_image` 只落在 `<img src>` 上，不是执行点
+- [x] `POST /api/v1/uploads`（requireAdmin + CSRF）：入参 `contentType`/`size`
+- [x] 校验：MIME 白名单、大小上限、**魔数嗅探在签发之后由 API 复核**（客户端声明可以撒谎）
+- [x] key 由服务端随机生成，**绝不使用用户文件名**（DTO 里根本没有 filename 字段，所以无东西可清洗）
+- [x] presigned PUT 60 秒有效、单 key~~、带 `content-length-range`~~ → **该条件在 presigned PUT 上不存在**（SPIKE-E 硬事实 1），体积改由 `complete` 里 `HeadObject` 实测
+- [x] 上传完成回调 `POST /api/v1/uploads/complete`：核实对象存在与真实类型，才返回可入库的 `publicUrl`
+- [x] 启动期确保桶存在（不假设桶已在）
+- [x] 前端：封面图字段旁加"上传"按钮（选文件 → 签发 → 直传 → 把返回的 `publicUrl` 填回字段）。字段仍可手填，不额外加限制——`cover_image` 只落在 `<img src>` 上，不是执行点
 
 **验证**：
 
@@ -329,6 +329,111 @@ pnpm --filter api test -- uploads
 #      文件名含 ../ → key 里不出现用户输入；未登录 → 401；普通用户 → 403
 # 断言响应体不含 MinIO 凭据或服务端内部路径
 ```
+
+### F 执行结论（2026-10-07）
+
+**先记一笔环境事故，因为它会影响下一个读到这段的人对数字的判断**：本轮中途 Docker Desktop 第三次自己退出，
+5432/6379/9000 同时关闭。子代理在那段时间如实报了"`uploads.test.ts` 一条都没执行"，没有把跳过说成通过；
+我把引擎起回来之后才重跑。`restart: unless-stopped` 让三个容器自己回来了，桶里对象数回来仍是 `0`。
+
+**门禁（全部由主控复跑，数字逐字抄自输出）**
+
+| 项 | 结果 |
+|---|---|
+| `--filter api lint` / `check` | `$ eslint .` / `$ tsc --noEmit`，退出 0 |
+| `--filter web lint` / `check` | 同上，退出 0 |
+| `-r build` | `packages/shared build: Done`、`apps/api build: Done`、`apps/web build: Done`，退出 0 |
+| `--filter api test`（全量） | `Test Files 21 passed (21)` / `Tests 296 passed (296)` |
+| 单点 `src/test/uploads.test.ts` | `Test Files 1 passed (1)` / `Tests 29 passed (29)` |
+| 残留 | 桶 `mc ls --recursive` → **0**；库 `articles 7 / comments 2`（seed 基线） |
+
+起点是 19 文件 / 226 测试。新增 40 条纯规则测试（`uploads-rules.test.ts`，不碰网络）+ 29 条真 MinIO 集成测试 + 1 条 config 契约测试。
+
+**主控自己跑的两次变异（不是转述子代理）**
+
+1. `s3-store.ts` 的 `inspect()` 顶部抛错，假装 MinIO 不可达 → **`11 failed | 18 passed (29)`**，还原后 29 绿。
+   这条是为了防止我把"29 条依赖 MinIO"说满：真实数字是 11 条踩在存储调用上，另 18 条测的是授权、白名单、签发形状、key 组成——它们本来就不该需要桶。
+2. 类型不符分支里的 `await this.store.remove(input.key)` 摘掉 → **`2 failed | 67 passed (69)`**（规则文件与集成文件各咬住一条），还原后全绿。
+   这条守的是 F 最容易被降级成注释的承诺：**被拒绝的对象必须从公开桶里消失**，不是"响应被拒了但字节还留在原地"。
+
+**主控本机量出来的第三方事实**（不是引用，是在 `apps/api` 目录下跑装好的 `@aws-sdk/client-s3@3.1146.0`）
+
+presigned PUT URL 的 query 参数随 `requestChecksumCalculation` 变化：
+
+```
+SDK-DEFAULT / WHEN_SUPPORTED → X-Amz-Algorithm, X-Amz-Content-Sha256, X-Amz-Credential, X-Amz-Date,
+                               X-Amz-Expires, X-Amz-Signature, X-Amz-SignedHeaders,
+                               x-amz-checksum-crc32, x-amz-sdk-checksum-algorithm, x-id
+WHEN_REQUIRED                → 同上，但【没有】那两个 x-amz-checksum* 参数
+两种模式下 X-Amz-SignedHeaders 都等于 host
+```
+
+`x-amz-checksum-crc32=AAAAAA==` 是**空 body** 的 CRC32（签发时没有 body 可算），浏览器 PUT 真实字节造不出这个值，
+于是失败会落在 MinIO 那一侧、且跨源请求的响应体 JS 读不到——**服务端断言全绿而真浏览器不工作**，正是 `app.inject()`
+那三次教训的同一种形状。所以 `createMediaS3Client` 里写死 `WHEN_REQUIRED`，并由 `uploads-rules.test.ts` 断言"这两个参数不得出现"，
+让它不可能被后来者"顺手清理"掉。
+
+**我（主控）下达的前提被本仓自己的实测推翻了两条，记下来是因为错理由比错代码更贵**
+
+- 我写"`credentials: 'include'` 会被桶的 CORS 设置拦掉"。`implement.md:405` 的预检响应原文里就有 `Access-Control-Allow-Credentials: true`——根本没拦。
+- 我写"多带 `x-requested-with` 会过不了预检"。`implement.md:422-423` 记的是 MinIO 把请求声明的头**全部反射**进 `Access-Control-Allow-Headers`，预检不是闸门；闸门是签名（第 4 节案例 #5：多一个未签名头 → 400 `There were headers present in the request which were not signed`）。
+- **结论没变**：直传仍用 `credentials: 'omit'`、仍只带 `Content-Type`。但正确理由是"凭据是白送给一个第三方源的，而签名 URL 本身就是全部权限"，不是"会被拦"。前端文件里的注释按前者写。
+
+**形状按 build 出来的样子**（`apps/api/src/modules/uploads/`：`store.ts` 三方法端口 / `s3-store.ts` SDK 适配 + 桶保证 / `schema.ts` DTO 与常量 / `service.ts` 规则 / `routes.ts` HTTP 边界；`plugins/media.ts` 装饰 `app.media`）
+
+- 三道闸：声明类型白名单（415）→ `HeadObject` 实测体积（413）→ 前 32 字节魔数（415）。前一道是**礼貌**，后两道才是闸门。
+- `sniffImageType` 里 WebP 需要 `RIFF`@0-3 **且** `WEBP`@8-11，所以读 32 字节而不是 8：只看 `RIFF` 会把 WAV/AVI 当 WebP。
+- key = `uploads/<UTC yyyy>/<UTC mm>/<randomBytes(16) hex>.<ext>`，`ext` 来自白名单表而不是任何用户串。
+- `publicUrl` 只由 `MEDIA_PUBLIC_BASE_URL` 与一个已过 `UPLOAD_KEY_PATTERN` 严格形状检查的 key 拼出。
+- 每个 SDK 错误都必须经过 `translate()`：`plugins/errorHandler.ts:80` 对 <500 的状态**原样转发 `error.message`**，而 AWS SDK 的 message 里带桶名、`name` 里带 S3 XML 的 `<Code>`。
+  变异验证过这条（把 SDK 的 message 透传 → 1 条红，报出 `leaked ECONNREFUSED`）。
+- `MEDIA_ENDPOINT`/`MEDIA_BUCKET`/`MEDIA_ACCESS_KEY_ID`/`MEDIA_SECRET_ACCESS_KEY`/`MEDIA_PUBLIC_BASE_URL` 是**必填无默认**，
+  因此它们是新的 CI 契约；已同步进 `ci.yml` 的 `env:`、`apps/api/.env`（未入库）、`apps/api/.env.example`。
+  `config/index.test.ts` 加了一条断言：这 5 个键必须出现在 `loadConfig` 的"一次报全"消息里——下一个必填键没法静默加进来。
+- 桶的公开读 policy **只给 `s3:GetObject`**，不给 `ListBucket`。依据是 SPIKE-E 记的 `mc anonymous set download` 会连带开放列举，
+  而"还没挂到任何文章上的封面草稿"正是不该被陌生人枚举的那一类。
+- `POST /uploads` 回 **201**（签发的是一张新能力凭证，且换个 key 才能再要一张）；`POST /uploads/complete` 回 **200**（它不创建资源，只宣布一个判定）。
+
+**本轮没能验证的四项**（第 1 项在同日补做并闭合；保留它是因为"当时为什么不算证完"这段判断本身有用）
+
+1. **浏览器那一发 —— 已闭合（同日补做，主控执行）。** 原来缺的是：29 条集成测试里的 PUT 由 Node 的 `fetch` 发出，
+   它证明签名有效，**不证明同源策略放行**；SPIKE-E 当年证的是手签 URL，而 SDK 生成的 URL 多了 `x-id`，
+   且上面那条 checksum 结论只有真浏览器能确认。补做过程（不是推演，是在 `http://localhost:5175` 的页面里点出来的）：
+   本地签发一枚管理员令牌注入 `portal_access`（`sub` = 种子管理员 id，`requireAdmin` 每次回查 `users.is_admin`，所以令牌里不放权限），
+   打开 `/admin/articles/new`，用 `upload_file` 把**磁盘上的真 PNG**（70 字节，魔数 `89504e470d0a1a0a`）塞进组件自己那个真实 input
+   ——只把 `className="hidden"` 摘掉以便取到 uid，**没有**手拼 fetch，走的是 `CoverImageUpload` 自己的代码路径。网络面板四行：
+
+   ```
+   POST http://localhost:3001/api/v1/uploads                      [201]
+   PUT  http://localhost:9000/portal-media/uploads/2026/10/<32hex>.png?X-Amz-Algorithm=…&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD
+        &X-Amz-Expires=60&X-Amz-SignedHeaders=host&x-id=PutObject [200]   ← 跨源那一发
+   POST http://localhost:3001/api/v1/uploads/complete             [200]
+   ```
+
+   URL 里**没有** `x-amz-checksum*`，正是上面量出来的 `WHEN_REQUIRED` 形状；预检没单独成行，但 200 只能穿过预检才拿得到。
+   界面回显 `已上传：70 B · image/png`（这两个数是服务端读回对象字节实测的），封面框里落
+   `http://localhost:9000/portal-media/uploads/2026/10/….png`。匿名 `curl` 那个 URL：`200 / Content-Length: 70 / Content-Type: image/png`，
+   且与探针文件 `cmp` 逐字节相同——证明真落盘而不是 fetch 假成功。探针对象随后 `mc rm`，`mc ls --recursive` 回到 **0**；
+   没有点保存，所以 `articles 7 / comments 2` 一字未动。
+   **F 的判定到此是闭合的**：签名有效（29 条集成）、同源策略放行（这一发）、字节实测（`cmp`）。
+2. **CI 改动仍未在 runner 上跑过**，但它的一处**已被本机证伪并改掉**：子代理把 MinIO 写成 `services:` 条目，我照 GH service 的语义（用镜像默认值）起了个一次性容器复现，结果是
+   `Exited (0)`、日志里只有 help 文本——`docker image inspect` 给出 `CMD=[] / ENTRYPOINT=[/usr/bin/minio] / USER=65532`，
+   也就是**裸跑 `minio` 不带 `server /data` 就打印用法退出**，而 service 块既没有 command/entrypoint 键也没有 `user:` 键（后者正是我们在 compose 里被迫加 `user: '0:0'` 的那个坑）。
+   已改成 `Start MinIO` 步骤（`docker run -d --user 0:0 … server /data`），并用同一条命令在本机做控制实验：`health=200 after 2 polls`、容器 `Up`。
+   `services:` 里现在只剩 redis/postgres；`Wait for MinIO` 那步保留（镜像内无 curl/wget/nc，探测只能在 runner 上做）。
+   CI 的 YAML 用 `yaml.safe_load` 验过解析通过、步骤顺序为 `Start MinIO → Wait for MinIO → Test`——**但"能解析"不等于"能跑绿"**，
+   `CreateBucket` + 公开读 policy 这条分支至今一次都没执行过（本机那个桶是 spike 当年用 `mc` 手工建的，本地永不走这条路）。CI 不给那个容器加卷，所以每次 runner 都是冷桶，这条路会在 CI 第一次真跑。
+   顺带一个已知不一致：本地桶仍带着 `download` 那套**较宽**的预设，与代码里窄 policy 不同；
+   因此子代理原本计划的"匿名列举必须被拒"这条断言被撤掉了——它会在 CI 绿、在本机红，测的是基础设施漂移而不是代码。
+   **留给 G/S8 的待办**：要么把本地桶 policy 收窄到与代码一致，要么在部署清单里写明两者差异。
+3. **没有"这个 key 是我签过的"ledger**（无 uploads 表，Redis 记账属于 S6  groundwork）。所以 `complete` 可以被管理员用来问"任意形状合法的 key 存不存在、前 32 字节是什么"。
+   论证过的可接受性：这个端点既不能读也不能写对象内容（`inspect` 只把字节报给发起请求的那个管理员，`remove` 只删它即将拒绝的东西），而写需要签名、签名又需要同样的管理员调用。
+   连带一个尖角：`complete` 对形状合法的 key 有删除权——若日后**调小** `MEDIA_MAX_UPLOAD_BYTES`，对一篇已发布文章的封面图重跑 `complete` 会把它删掉。当前不可达（桶里没有超标对象），但它不是零。
+4. **`apps/web` 没有测试设施**（长期约束），所以前端这一棒只有 `tsc --noEmit` + `vite build` 两道静态闸；`CoverImageUpload.tsx` 的四段状态机从未在运行时被执行过第二次。
+
+**顺带修掉的一处**：子代理写的运维提示原文说"该检查每请求都跑、无需重启 API"。我核了调用点（`plugins/media.ts:52`，只在插件注册期一次），
+这句话是反的——桶在 MinIO 宕着的时候缺失，就**不会自愈**，必须重启 API。已按事实改写，并写明为什么是"只跑一次"而不是每请求都去 `HeadBucket`。
+
 
 ---
 
