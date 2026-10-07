@@ -504,10 +504,10 @@ WHEN_REQUIRED                → 同上，但【没有】那两个 x-amz-checksu
 
 ## 收尾
 
-- [ ] 更新 prd 的验收勾选，未做的照实标注
-- [ ] `supabase/migrations/` 加"已停用"说明（保留历史，不误导后来者）
-- [ ] 在父任务 `implement.md` 标记 S3 完成，并记下 **S3 遗留缺口**：无限流(S6)、图片无处理管线/EXIF 未清、无软删除
-- [ ] `git tag s3-done`
+- [x] 更新 prd 的验收勾选，未做的照实标注 —— 十条全核过；带 ⚠️ 的两条写明了缺哪一半（第 7 条：`grep` 在 `apps/web/src` 仍命中 **1 处注释里的历史提及**，不是 0；第 9 条：本机全绿，但 **CI 那一半从未在 runner 上跑过**）
+- [x] `supabase/migrations/` 加"已停用"说明（保留历史，不误导后来者）—— 新增 `supabase/migrations/README.md`。顺带查明一件值得记的事：`02` + `05` 那两个文件是 `typescript-5-new-features` / `gsap-animation-tutorial` / `micro-frontends-practice` 三篇**在仓库里唯一的残存副本**（现库 `count = 0`，`fixtures/` 里也只有七个测试夹具）。R19 的"丢弃"在库层面成立，字节仍在 git 里；想发回来就是把正文抠成 `.md` 走导入，不需要新工具。另外核对时发现 `05` **根本不是 schema**，它是对三篇正文的改写——所以"由后续迁移替代"那句是错的，已按事实改写。
+- [x] 在父任务 `implement.md` 标记 S3 完成，并记下 **S3 遗留缺口** —— 八条，按代价排序，前两条（无导出/备份、EXIF 未清）标为 S8 上线前必须处理；同时写明两处与原计划的偏离（Supabase 只读路径没有"再留一个阶段"而是当场移除；C 阶段从 shell 同步改成导入端点）
+- [x] `git tag s3-done`
 
 ---
 

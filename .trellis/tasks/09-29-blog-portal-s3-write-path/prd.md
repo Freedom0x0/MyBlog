@@ -75,16 +75,18 @@ S3 完成后，前端读写**全部指向自建 API**，而 API 目前只跑在�
 
 ## 验收标准
 
-- [ ] 文章：创建→草稿不出现在公开列表→发布→出现在列表与详情→更新→删除，全链路有集成测试
-- [ ] 改 slug 后评论仍随文章可查（外键生效的直接证明）
-- [ ] 并发用同一 slug 创建：恰好一条成功，其余 409 `SLUG_CONFLICT`
-- [ ] 评论：作者能删自己的、删他人的得 403、管理员能删任意、`parentId` 跨文章被拒
-- [ ] 导入：多份一次提交、其中一份格式错 → 整批零写入；`status: published` 的 `.md` 导入后仍是草稿；同 slug 第二次导入报 conflict 而不是静默覆盖
-- [ ] presigned 直传成功；超限/错类型/用户构造文件名三种情况被拒
-- [ ] `grep` 证实 `apps/web/src` 无任何 Supabase 引用；`@supabase/supabase-js` 不在 `apps/web/package.json`
-- [ ] 新端点全部要求鉴权之处有**反向测试**（无凭证 401、有权但非管理员 403）
-- [ ] `pnpm -r lint / check / test / build` 全绿，CI 顺序在临时库跑通
-- [ ] 所有新端点进入 `packages/shared` 契约且有编译期漂移守卫
+> 2026-10-07 逐条核对。勾=有测试且我复跑过；带 ⚠️ 的是"做了但证据有缺口"，写明缺在哪。
+
+- [x] 文章：创建→草稿不出现在公开列表→发布→出现在列表与详情→更新→删除，全链路有集成测试（`articles-write.test.ts`；另有一次**清空 seed 后在真浏览器里点出来**的空库走查，见 implement.md "空库走查"一节，那一趟抓出了轮播把"没有文章"显示成"还在加载"的真缺陷）
+- [x] 改 slug 后评论仍随文章可查（外键生效的直接证明）——`articles-write.test.ts:362-363`
+- [x] 并发用同一 slug 创建：恰好一条成功，其余 409 `SLUG_CONFLICT`——`:410-415`；另加同 slug 并发改名 `:432` 与"两次并发首发只写一次时间戳" `:307-316`
+- [x] 评论：作者能删自己的、删他人的得 403、管理员能删任意、`parentId` 跨文章被拒——`comments-write.test.ts`（403 那条还带"写入未发生"的控制，摘掉控制项会有测试红）
+- [x] 导入：多份一次提交、其中一份格式错 → 整批零写入；`status: published` 的 `.md` 导入后仍是草稿；同 slug 第二次导入报 conflict 而不是静默覆盖——`articles-import.test.ts`（conflict 会带回服务端解析出的 `proposed`，覆盖因此是一次 `PATCH` 而非第二次解析）
+- [x] presigned 直传成功；超限/错类型/用户构造文件名三种情况被拒——`uploads.test.ts` 29 条真 MinIO + 40 条规则测试；**"用户构造文件名"这一类是结构性不可能**而非被测拒：DTO 里没有 `filename` 字段，key 全由时钟与 `randomBytes(16)` 生成，另有一条测试钉住 `complete` 只接受自己签发过的 key 形状。跨源那一发也在真浏览器里补验过（PUT 200、匿名 GET 逐字节相同）
+- [x] ⚠️ `grep` 证实 `apps/web/src` 无任何 Supabase **代码**引用；`@supabase/supabase-js` 不在 `apps/web/package.json` —— 实测 `grep -i supabase` 在 `apps/web/src` 剩 **1 处命中，是注释里的历史提及**（解释"空表是真实状态而非加载中"），无 import、无 SDK、无 `VITE_SUPABASE_*`。照实记这条，不写成 0
+- [x] 新端点全部要求鉴权之处有**反向测试**（无凭证 401、有权但非管理员 403）—— G 段补齐四个缺口并给出删守卫的**红数对比**（refresh 的 CSRF：补前 0 红 / 补后 1 红；articles 的"拒绝未真中止写入"：补前 0 红 / 补后 9 红）
+- [x] `pnpm -r lint / check / test / build` 全绿，⚠️ **"CI 顺序在临时库跑通"这一半未验证** —— 本机 `lint`/`check` 退出 0、`Test Files 21 passed (21) / Tests 299 passed (299)`、`-r build` 三包全 Done。但本轮为 F 新增的 `Start MinIO` step **从未在 GitHub runner 上执行过**（本机无 runner），且桶自动创建那条分支本地永不走（本机桶是 spike 手工建的），所以这条只能算"本机绿、CI 待第一次真跑"
+- [x] 所有新端点进入 `packages/shared` 契约且有编译期漂移守卫——19 个 `*_MATCHES_CONTRACT`；余下 7 个无守卫接口**逐个用变异量过兜法**：4 个由父 schema 组合兜、2 个由字面量标注兜、1 个（`ReadinessPayload`）原本谁也不兜，已用 `satisfies` 补上并复验（修前 0 错、修后 TS1360）
 
 ## 已知限制（明确记录）
 
