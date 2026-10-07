@@ -155,15 +155,31 @@ key 形态：uploads/<yyyy>/<mm>/<random32hex>.<ext-from-sniffed-type>
 ```
 
 - **绝不用用户提供的文件名**：`../../etc/passwd`、`a.svg`（可含脚本）、同名覆盖他人对象，全都来自信任这个名字。
-- 扩展名由**内容嗅探**决定，不由请求声明决定：客户端可以声明 `image/png` 而传 SVG/HTML。**先看魔数再决定存成什么**（PNG/JPEG/GIF/WebP 魔数在应用层判，几百行内）。
-- 大小上限在**签发时**就用 `content-length-range` 条件钉住，而不是等上传完再拒绝。
+- **白名单不含 SVG**：SVG 是 XML，可携带脚本；它一旦由本站的媒体源提供，就是站在本站域名下的
+  执行点。四类允许：PNG / JPEG / GIF / WebP。
+- key 的扩展名由**签发时声明的类型**决定，但**由嗅探结果把关**：两者不一致就在完成回调里
+  删对象 + 415。这样"活下来的对象"其扩展名与内容必然一致，不需要先上传再改名（改名要 copy+delete，
+  多两处可失败）。
+- ~~大小上限在**签发时**就用 `content-length-range` 条件钉住，而不是等上传完再拒绝。~~
+  **SPIKE-E 否证了这条**：`content-length-range` 是 POST policy 的条件，presigned **PUT** 上没有
+  （实测 `mc share upload` 生成的 policy 里也没有）。签发时拦不住体积，只能在
+  `uploads/complete` 里用 `HeadObject` 拿服务端实测的 `ContentLength` 事后不认——拒绝即删对象，
+  不让它留在公开桶里。签发时收到的 `size` 只当作**早退**用（明显超限就别签了），不当作防线。
 - URL 有效期短（60 秒），且一次签一个 key（不可复用）。
+- **`HeadObject` 返回的 `ContentType` 不能当校验用**：presigned PUT 的签名只覆盖 `host`
+  （`X-Amz-SignedHeaders=host`），所以 `Content-Type` 是客户端自由声明、原样存下、再原样读回的东西。
+  真实类型只能从**字节**判——完成回调里读对象前若干字节做魔数嗅探（≥12 字节：WebP 要看 0-3 的
+  `RIFF` 和 8-11 的 `WEBP`）。因此"声明 `image/png` 实为 SVG"这条要求里，嗅探是硬门，不是加分项。
 
 ### 4.3 桶与访问
 
 - `portal-media`，公开只读（博客图片要能直接被 `<img>` 引），写只走 presigned PUT。
 - Compose 加 `minio` + healthcheck + 卷 + `MINIO_API_CORS_ALLOW_ORIGIN`。
-- 一个启动期确保桶存在的步骤（不假设桶已在）。
+- **启动期确保桶存在**的做法定为：一次 `HeadBucket`；不存在才 `CreateBucket` + 公开只读 policy，
+  且只在创建那一次设 policy。理由是它让本地与 CI 零手工步骤（spike 那轮是靠 `mc` 手工建的，
+  换机器就没了），而生产上桶由基础设施先建好——`HeadBucket` 直接命中，这段代码永不执行。
+  代价写明白：应用的凭据因此需要建桶与设 policy 的权限。**桶策略管公开读，CORS 管谁能写**，
+  两者是分开的两件事，别把 `MINIO_API_CORS_ALLOW_ORIGIN` 当成读的开关。
 
 ---
 
