@@ -439,12 +439,66 @@ WHEN_REQUIRED                → 同上，但【没有】那两个 x-amz-checksu
 
 ## G · 安全收口
 
-- [ ] 所有写端点补齐**反向授权测试**（缺头、无凭证、非管理员、跨作者）
-- [ ] 错误响应抽查：不含 `23505`、不含 SQL、不含服务端路径
-- [ ] 若 F 做了 API 中转：确认请求体有上限，否则一个请求能打满内存（**这是新增攻击面**）
-- [ ] 契约守卫：新 DTO 都有 `*_MATCHES_CONTRACT`
-- [ ] CI：MinIO 若被测试依赖，加进 services；确认 `env -u` 步骤仍然只剥该剥的变量
-- [ ] 逐条过 OWASP **写操作**相关项（CSRF、越权、上传校验、资源限制），结论写回本文件
+- [x] 所有写端点补齐**反向授权测试**（缺头、无凭证、非管理员、跨作者）
+- [x] 错误响应抽查：不含 `23505`、不含 SQL、不含服务端路径
+- [x] ~~若 F 做了 API 中转：确认请求体有上限~~ → **F 没做中转**（presigned 直传），该条不适用；写路径的体上限由 `IMPORT_BODY_LIMIT_BYTES` 与 uploads DTO 承担，均已有测试
+- [x] 契约守卫：新 DTO 都有 `*_MATCHES_CONTRACT`（并查清 7 个无守卫接口各自靠什么兜住）
+- [x] CI：MinIO 被测试依赖 → 已加，且**必须是 step 不能是 service**（见 F 那节末）；`env -u` 那条老断言在新必填键下复验仍成立
+- [x] 逐条过 OWASP **写操作**相关项，结论写回本文件（文末"OWASP 写操作清单结论"）
+
+### G 执行结论（2026-10-07）
+
+**先给矩阵事实**（派子代理盘点，我逐条开文件复核）：状态变更路由共 **10 条**，全部带 `requireCsrfHeader`；
+所有 guard 都是逐路由的 `onRequest` 数组——全树只有 `onClose` 三种拆卸钩子，没有任何全局 auth 钩子，
+所以"某个写动词漏了 CSRF"这种事只能在路由表里看，不能靠"应该有钩子"推断。
+`requireAdmin` 内部先 `await` 认证，因此管理员写路径上**无凭证拿到的是 401 而不是 403**（三条测试都钉住了这一点）。
+
+**四个缺口，每一个都用变异证明过"补之前那条测不到、补之后测得到"**（红数取自当次输出）：
+
+| 缺口 | 变异 | 补前 | 补后 |
+|---|---|---|---|
+| `POST /auth/refresh` 的 CSRF 从未被反向测（路由有 guard，但 4 处调用点全带 `x-requested-with`） | 删掉 refresh 的 `requireCsrfHeader` | **0 红** | **1 红** |
+| 同上 | 把 guard 挪到轮换之后（先烧 token 再拒绝） | — | 1 红，且**只红在"拒绝没花掉令牌"那半**（`expected 401 to be 200`）——403/code/无 Set-Cookie 三项全绿，这正是那半存在的理由 |
+| refresh 两条既有 401 只断状态、不断 `code`；"完全没有 cookie"这一路无人测 | 把 401 的 code 换成 `BAD_REQUEST`（状态不动） | **0 红** | **2 红** |
+| logout 的 best-effort 204 | 给 logout 加上 `requireAuth` | 2 红 | 3 红（多出的正是新加的"无 cookie 也 204 且无 body"） |
+| articles 的 9 条反向用例不证明"拒绝真中止了写入" | 三个动词都改成"先写库、后 guard" | **0 红** | **9 全红**，且每条红在控制项（`expected 17 to be 16`、行被改写、行被删），状态与 `code` 断言**一条都没红** |
+
+为什么 refresh 那条不是"补个空白"：它的凭证是 `SameSite=Lax` 的 cookie，而 Lax 允许**跨站顶层导航**带上它——这是全 API 里唯一一个 CSRF 缺位有真实利用形状的端点。
+
+**一处我没照抄子代理的地方，而且它纠正的是它自己**：它把 `comments-write.test.ts:580-597` 列为"形状完全相同的洞"。
+我把同一个变异（guard 挪到写之后）打上去，测出 **HEAD 版本也红 1 条**——红的是同一条用例，但原因不是断言，
+而是那里的目标文章**根本不存在**，写入自己失败把 403 变成了 404，于是排序错误"碰巧"以状态变化的形式暴露。
+那两条我还是改了（打在真实存在的行上 + 直接断 DB 状态），但记账的理由换了：**不是补漏洞，是拆掉一条靠巧合通过的耦合**——
+下一个人如果把 fixture 改成存在的文章，HEAD 那版就会变成 0 红。顺带它另一句"没有测试会因把评论删除统一成 404 而失败"也复核为假：
+`comments-write.test.ts:402-403` 明确钉着 403 + `FORBIDDEN`。
+
+**错误响应抽查**（挑全部不落数据的探针跑完，seed 已重跑复原 `articles 7 / comments 2`）：`23505`、约束名、SQL 片段、
+`.ts:行号`、Windows 路径、桶名 `portal-media`、`FST_ERR`、`NoSuchBucket`/`AccessDenied`/`<Code>` —— 六类探针 + 三条补充 404/409 全部 **0 命中**。
+一条自己的错也记着：第一版 `DELETE` 探针带了 `-d ''` 和 `content-type: application/json`，拿到的是 Fastify 的"body 不能为空"400，
+**是探针写错不是产品错**（真实客户端不受影响：`apiClient` 只在有 body 时才设 content-type）。
+
+**契约守卫审计**：26 个 shared 接口，19 个有 `*_MATCHES_CONTRACT`。剩下 7 个我**逐个用变异量**它靠什么兜住：
+
+| 无守卫接口 | 变异 | 结果 |
+|---|---|---|
+| `ImportArticleFile` / `Created` / `Conflict` / `CommentAuthor` | 给嵌套接口加必填字段 | **父守卫抓到**：`comments/schema.ts(72,77) TS2322 'true' is not assignable to 'false'`，外加 `repository.ts(233,5) TS2741` |
+| `LivenessPayload` | 同上 | **抓到**：`health.ts(38,61) TS2741`（那一行直接返回字面量） |
+| `ApiErrorEnvelope` | 同上 | **抓到**：`errorHandler.ts(43,77)` 两处都 TS2741 |
+| `ReadinessPayload` | 同上 | **谁也没抓到** ← 本轮唯一新出现的真空 |
+
+最后一行的机制值得写清：`health.ts:62` 是 `return reply.code(...).send({...})`，而 **`send()` 的入参在 Fastify 里是无类型的**，
+所以箭头函数上那个 `Promise<ReadinessPayload>` 标注从未抵达这个对象字面量——它是个装饰品。已加 `satisfies ReadinessPayload`，
+并用同一个变异复验：**修前 0 错，修后 `health.ts(74,7) TS1360 does not satisfy the expected type 'ReadinessPayload'`**。
+这条是 `/ready`，是负载均衡读的那个契约，静默漂移的代价正是"探针永远不跳闸"。
+
+也记一笔实验本身的错：第一次跑嵌套变异时我得到"无错"，原因是**忘了重建 `shared` 的 dist**——api 是透过 `.d.ts` 拿类型的，
+只改源码不会红。补上 `--filter shared build` 后同一变异立刻抓到。教训：**"没有报错"必须同时证明"变异真的进了编译视野"**。
+
+**本轮 G 没能验证的**：CI 从未在 runner 上跑过（本机无 runner）；`comments-write` 里 DELETE 那条控制项只在"守卫晚于写入"这一种排序下被测到，
+另一种（guard 存在但 code 写错）由 status/code 断言覆盖，我没再单独构造；`/ready` 的 satisfies 只保证编译期，运行时形状仍无 zod 校验（这三个 payload 本来就没有 schema，属设计选择）。
+
+**门禁（数字逐字抄自输出）**：`--filter api lint` 退出 0，`--filter api check` 0 错，`--filter api test` → `Test Files 21 passed (21)` / `Tests 299 passed (299)`（F 结束时是 296；+3 全在 `auth-flows`）。
+所有变异均已还原（`git diff` 只含 4 个文件：3 个测试 + `routes/health.ts`），库 `7|2`，桶 `0` 个对象。
 
 ---
 
@@ -705,6 +759,29 @@ acao    http://localhost:5175
    `$$hc_resp` 里的 `$` 当变量插值，`read -r` 的**目标名**不能带 `$`（两处都实测炸过一次才写对）。
    现在 `docker ps` 里 `myblog-infra-minio-1` 是 `healthy`，`localhost:9000/minio/health/live` 从宿主回 200。
 
-## OWASP 写操作清单结论（执行时填写）
+## OWASP 写操作清单结论（2026-10-07 逐条过）
 
-待填。
+图例：✅=有实现且有测试钉住（含变异证据）；⚠️=有实现但证据不完整/有已知尖角；❌=本轮明确不做，已记为缺口。
+
+| # | 条目 | 状态 | 依据与位置 |
+|---|---|---|---|
+| 1 | **访问控制：默认拒绝、越权、IDOR** | ✅ | 10 条写路由全部逐路由 `onRequest`；`requireAdmin` 每次回查 DB 的 `users.is_admin`（不是读令牌里的声明），所以撤权在下一次请求生效。唯一的用户↔用户所有权轴是评论作者，`comments-write.test.ts:402` 钉住"外人删 → 403 + `FORBIDDEN`"，且同一条还带**写入未发生的控制**（评论仍在列）与"作者本人仍可删"，403 若是删完之后抛的就红。 |
+| 2 | **CSRF** | ✅ | 全部 10 条写路由（含 `PATCH`/`DELETE`）都挂 `requireCsrfHeader`；头由方法推导而非调用点传参，所以"忘了传"这条路被堵。反向测试补了 refresh（`G` 那节变异表：删掉 guard 从 **0 红** 变 **1 红**）。豁免只有两类且都写明理由：管理端 GET 读只要 `requireAdmin`（读无可伪造），OAuth 回调 GET 用 `state` + 浏览器侧 nonce 替代（`auth-flows` 有两条钉住）。 |
+| 3 | **注入（SQL / 命令 / 模板）** | ✅ | SQL 只在 repository 层且全用 `$n` 参数；错误响应抽查里 `23505`、约束名、SQL 片段 0 命中。markdown 解析器不执行任何嵌入内容，且导入的 `content` 落库前已过 `CreateArticleSchema` 复校。 |
+| 4 | **上传校验** | ✅ | 三道闸，声明白名单只是礼貌，真正的两道是 `HeadObject` 实测体积 + **前 32 字节魔数**（SPIKE-E 硬事实：`Content-Type` 不在签名内，`HeadObject` 回的类型是客户端自己声明的原样回声）。SVG 排除。拒绝即 `DeleteObject`。变异证明：摘掉 `remove` → 2 条红（规则与集成各一）。 |
+| 5 | **资源限制 / DoS 面** | ⚠️ | 已有：单文件 128 KiB、单批 20 文件、批总 2 MiB、导入路由体上限 8 MiB、上传实测 5 MiB、presign 60 秒单 key、分页上限。缺失：**无任何速率限制**（❌ 归 S6）——管理员会话被劫持后可无限签发上传、无限建草稿；`/ready` 里的检查超时是唯一已有的"慢依赖不拖死进程"。 |
+| 6 | **错误处理与信息泄漏** | ✅ | 单一 envelope `{code,message,requestId}`；只有 `ApiError` 保有自己的 code/message，其余按状态映射、5xx 消息一律替换。`uploads` 的每个 SDK 调用必过 `translate()`，抽查确认桶名与 `<Code>` 不外泄（`NoSuchBucket`/`AccessDenied` 0 命中）。 |
+| 7 | **会话管理** | ✅ | 15 分钟 access + 轮换 refresh（旧值进 Redis 拒绝名单，重放被拒并有测试）；cookie `httpOnly` + 分路径（access `/`、refresh `/api/v1/auth`）。本轮补上：refresh 无 cookie → 401 + `code`；logout 无任何 cookie → 204 且无 body（框架会剥掉 204 的体，所以"无 body"那半只能算文档，已注明）。 |
+| 8 | **数据暴露（媒体）** | ⚠️ | 桶是公开只读（博客图片必须能被 `<img>` 直读），写只认签名。代码里的 policy **只给 `s3:GetObject`**，比 `mc anonymous set download` 窄（后者连带开放列举，会把"还没挂到文章的封面草稿"变成可枚举）。尖角：本机现存那个桶是 spike 当年用宽预设手工建的，**与代码不一致**，故"匿名列举必须被拒"这条断言被撤（否则 CI 绿本机红，测的是基础设施漂移不是代码）。留给 G/S8 收敛。 |
+| 9 | **秘钥与凭据** | ✅ | `JWT_SECRET`/OAuth secret/Media 凭据只在未入库的 `.env`（`git check-ignore` 验过），`.env.example` 全为占位；本轮两次提交前都做了泄漏扫描（真值 0 命中，签名串一律 `…`）。CI 里是显式命名的假值。⚠️ 尖角：API 进程持有的是 **MinIO root 凭据**，因此能建桶、能改 policy——这是"启动期确保桶存在"这个决定换来的代价，已在 design §4.3 写明并由用户批准。 |
+| 10 | **契约漂移防护** | ✅ | 19 个 `*_MATCHES_CONTRACT`（双向 `AssertEquivalent`）；其余 7 个接口逐个量过兜法——4 个由父 schema 组合兜、2 个由字面量标注兜、**1 个（`ReadinessPayload`）原本谁也不兜**，已用 `satisfies` 补上并复验（修前 0 错，修后 TS1360）。 |
+| 11 | **构建产物里的服务端秘钥** | ✅ | CI 有专门一步 grep `apps/web/dist`；本轮新增的 `MEDIA_*` 键全部不带 `VITE_` 前缀，且 `MEDIA_SECRET_ACCESS_KEY` 是签名密钥，这一点写在 `.env.example` 的注释里。 |
+| 12 | **图片内容本身的隐私** | ❌ | **无处理管线，EXIF 不清除**。个人博客的真实危害面：带 GPS 的照片公开后就是位置暴露。归入 S3 遗留缺口，S8 上线前应与"导出/备份"一起处理。 |
+
+**按代价排下来的待办**（都不在本轮批准范围内，列出来是为了下一步不至于重新发现）：
+
+1. **速率限制**（S6）：第 5 条那个 ⚠️ 的唯一解；优先给 `POST /articles`、`/articles/import`、`/uploads` 三个。
+2. **EXIF/GPS 剥离**：第 12 条。代价是做图像处理依赖，或退一步——上传时直接剥掉常见 EXIF 段。
+3. **本地桶 policy 与代码对齐**：第 8 条的尖角，一条 `mc anonymous set-json` 就能收敛。
+4. **uploads 的签发 ledger**（Redis 即可）：把"管理员能读任意形状合法 key 的前 32 字节"这条论证过的可接受性换成硬约束。
+5. **CI 真跑一次**：`Start MinIO` + `Wait` 只在本机做过控制实验，runner 上从没执行过；桶自动创建那条分支也只在 CI 第一次真走。
