@@ -297,6 +297,62 @@ export interface ImportArticlesResponse {
   results: ImportArticleResult[]
 }
 
+/**
+ * ── Uploads (S3 stage F, design §4.2) ───────────────────────────────────────
+ *
+ * Four shapes for two calls, because a browser cannot be trusted with either the
+ * size or the type of what it is about to PUT (SPIKE-E, hard fact 2). The API
+ * therefore issues a *capability* first and a *verdict* second, and only the
+ * verdict contains a URL fit to be stored on an article.
+ */
+
+/**
+ * Body of `POST /api/v1/uploads`: the client's *declaration* of what it intends to
+ * upload. Both fields are advisory and neither is signed, so neither is a check —
+ * `size` exists so an obviously-over-large file is refused before a signature is
+ * wasted, and `contentType` exists only to choose the key's extension. What
+ * actually landed is decided later by `HeadObject` and a magic-byte sniff.
+ */
+export interface RequestUploadInput {
+  contentType: string
+  size: number
+}
+
+/**
+ * Response of `POST /api/v1/uploads`.
+ *
+ * Deliberately **no** public URL here: nothing has been uploaded yet, and handing
+ * back `base/key` at signing time would advertise a location for an object that
+ * may never arrive or may arrive as something else. `expiresAt` is the signature's
+ * own deadline, not a guess — the client needs it to decide to re-sign rather than
+ * to retry a PUT that MinIO will answer with `Request has expired`.
+ */
+export interface PresignedUpload {
+  key: string
+  uploadUrl: string
+  expiresAt: string
+}
+
+/** Body of `POST /api/v1/uploads/complete`. */
+export interface CompleteUploadInput {
+  key: string
+}
+
+/**
+ * Response of `POST /api/v1/uploads/complete` — the only upload response whose
+ * `publicUrl` is safe to write into `articles.cover_image`.
+ *
+ * `contentType` is the type *measured from the bytes*, not the type the client
+ * declared, and `sizeBytes` is likewise the server's number. A caller that wants
+ * to display dimensions or reject a file by real weight has those here rather than
+ * having to trust its own `File` object.
+ */
+export interface CompletedUpload {
+  publicUrl: string
+  contentType: string
+  sizeBytes: number
+}
+
 export interface CommentAuthor {
   /**
    * The author's user id.

@@ -74,6 +74,66 @@ const EnvSchema = z.object({
    * cookies. Enumerating the accepted text makes a typo fail at boot instead.
    */
   COOKIE_SECURE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+
+  // ── Media object storage (S3 stage F, design §4.2/§4.3) ──────────────────────
+  //
+  // REQUIRED keys: MEDIA_ENDPOINT, MEDIA_BUCKET, MEDIA_ACCESS_KEY_ID,
+  // MEDIA_SECRET_ACCESS_KEY, MEDIA_PUBLIC_BASE_URL.
+  //
+  // The two credentials have no default by the same rule that keeps `JWT_SECRET`
+  // un-defaulted: a default secret is a credential committed to the repository, and
+  // a missing one must stop the process at boot rather than surface as a 500 on the
+  // first upload. The endpoint, bucket and public base are required too, even
+  // though "obviously" they are localhost:9000 and portal-media — because that
+  // reasoning is exactly how a production deploy that forgot the variable ends up
+  // dialling a host that does not exist, hours after boot, on a user-visible
+  // request. `DATABASE_URL` is required for the same reason; media is not a
+  // second-class dependency.
+  //
+  // CONSEQUENCE, and the reason this paragraph is here rather than in a README:
+  // every key marked required is a CI contract. `.github/workflows/ci.yml` sets
+  // them in its job-level `env:` block; add a required key without adding it there
+  // and every integration file's `beforeAll` dies with a `ConfigError` in CI while
+  // staying green on any machine that has an `apps/api/.env`.
+  MEDIA_ENDPOINT: z.url(),
+  MEDIA_BUCKET: z.string().min(1),
+  MEDIA_ACCESS_KEY_ID: z.string().min(1),
+  MEDIA_SECRET_ACCESS_KEY: z.string().min(1),
+
+  /**
+   * Where a browser reaches the same bucket publicly.
+   *
+   * Kept separate from `MEDIA_ENDPOINT` on purpose: they differ in production (the
+   * API signs against a private endpoint, visitors' `<img>` tags load through a CDN
+   * or reverse proxy), and `publicUrl` is built from *this* value only — so a
+   * mis-set endpoint can never leak an internal hostname into a page.
+   */
+  MEDIA_PUBLIC_BASE_URL: z.url(),
+
+  /**
+   * Not `auto-discovery`: SigV4 needs a region string even for MinIO, which ignores
+   * it as long as the same one is used for signing and for the bucket. `us-east-1`
+   * is MinIO's own default, so it is the value that cannot disagree with anything.
+   */
+  MEDIA_REGION: z.string().min(1).default('us-east-1'),
+
+  /**
+   * Hard cap on a stored object, measured by the server after the PUT.
+   *
+   * 5 MiB is a ceiling for blog cover images, not a target. This number is the one
+   * that actually binds: the `size` in an upload request cannot be enforced at
+   * signing time because `content-length-range` is a POST-policy condition that
+   * presigned PUTs do not have (SPIKE-E hard fact 1).
+   */
+  MEDIA_MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024),
+
+  /**
+   * How long a signed PUT stays valid. Bounded well below an hour on purpose: the
+   * signature grants a write to a bucket whose contents become public, so its
+   * lifetime is the window in which anyone holding the URL can replace the object.
+   * 60 s covers a cover image on a slow connection and nothing else.
+   */
+  MEDIA_PRESIGN_TTL_SECONDS: z.coerce.number().int().min(5).max(900).default(60),
 })
 
 export type Config = z.infer<typeof EnvSchema>

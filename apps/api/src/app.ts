@@ -12,9 +12,11 @@ import { authPlugin } from './plugins/auth.js'
 import { authRoutes } from './modules/auth/routes.js'
 import { errorHandlerPlugin } from './plugins/errorHandler.js'
 import { healthRoutes } from './routes/health.js'
+import { mediaPlugin } from './plugins/media.js'
 import { articleRoutes } from './modules/articles/routes.js'
 import { commentRoutes } from './modules/comments/routes.js'
 import { tagRoutes } from './modules/tags/routes.js'
+import { uploadRoutes } from './modules/uploads/routes.js'
 
 export interface BuildAppOptions {
   config: Config
@@ -117,6 +119,14 @@ export async function buildApp({
   // After redisPlugin: the denylist is stored in Redis.
   await app.register(denylistPlugin)
 
+  /**
+   * After the other infrastructure plugins and before the routes, like `db`: the
+   * upload routes read `app.media`. The bucket assurance runs here, at assembly, and
+   * never fails assembly — see `plugins/media.ts` for why an unreachable MinIO must
+   * not take the process (or the public reads) down with it.
+   */
+  await app.register(mediaPlugin, { config })
+
   // Before authPlugin: requireAuth reads the access token from a cookie, and
   // request.cookies only exists once @fastify/cookie has run.
   await app.register(cookie)
@@ -128,6 +138,7 @@ export async function buildApp({
   await app.register(articleRoutes)
   await app.register(commentRoutes)
   await app.register(tagRoutes)
+  await app.register(uploadRoutes)
   await app.register(authRoutes)
 
   return app
