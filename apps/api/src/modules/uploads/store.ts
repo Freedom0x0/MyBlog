@@ -1,5 +1,5 @@
 /**
- * The storage port for media objects — three methods, and the count is deliberate.
+ * The storage port for media objects — four methods, and the count is deliberate.
  *
  * Why a port at all: the interesting rules of stage F (which declared type buys
  * which extension, what a key may look like, whether the bytes agree with it, when
@@ -11,11 +11,24 @@
  * suite is left to prove the one thing a fake cannot: that a signature MinIO accepts
  * really does produce an object whose bytes say what we sniffed.
  *
- * `ListObjects`, `PutObject`, `CreateBucket` and friends are *not* on this port. The
- * upload surface has no reason to enumerate a bucket, and writes only ever happen
- * with a browser holding a signature. The bucket-creation calls the startup
- * assurance makes live in `s3-store.ts` for the same reason they are not here: the
- * rules layer must not be able to reach them.
+ * `ListObjects`, `CreateBucket` and `PutBucketPolicy` are *not* on this port. The
+ * upload surface has no reason to enumerate a bucket, and bucket-shape work belongs to
+ * startup rather than to a request. Keeping them off is what stops the rules layer from
+ * being able to reach them.
+ *
+ * **Writes, and the one that is allowed.** This port used to read "writes only ever
+ * happen with a browser holding a signature", and that is still true of *uploads*: the
+ * PUT that creates an object is signed for one key for sixty seconds and the API never
+ * sees those bytes, which is exactly why `complete` has to verify after the fact.
+ * `replace` is a different capability and is named as one: the server rewriting an
+ * object it has just measured, in the same request that measured it, because a photo's
+ * EXIF can carry the owner's coordinates and the bucket is publicly readable
+ * (`lib/imageMetadata.ts`, stage S8-c). What the shape of this port now protects is that
+ * no caller can create a key it did not sign for or write anywhere it has not just
+ * read, so the rules that keep `replace` narrow live in `UploadService.complete`, its
+ * only caller: the key has passed the strict shape check, the object's real size and
+ * magic bytes have come from the bucket, and the bytes written back are that object's
+ * own bytes with segments cut out of them.
  */
 
 /** What `presignPut` hands back: a capability with a deadline, nothing more. */
@@ -27,7 +40,7 @@ export interface PresignedPut {
 }
 
 /**
- * What the server measured about an object: its real size and its first bytes.
+ * What the server measured about an object: its real size and its leading bytes.
  *
  * One method, both facts, because verification needs both at once — and because
  * splitting them would let a caller compare a size from one moment against bytes
@@ -36,6 +49,13 @@ export interface PresignedPut {
  * `head` may be shorter than the requested count when the object is smaller than
  * that (a 4-byte file has 4 bytes), and empty for a 0-byte object. That is the
  * transport's honest report, not a truncation to work around.
+ *
+ * Asking for a count at or above the object's size returns **the whole object**, and
+ * the strip step relies on that rather than on a second method: an EXIF segment begins
+ * past where a 32-byte sniff can see (`imageMetadata.test.ts` measures the coordinates
+ * at byte 141 of an 827-byte fixture), and the size gate has already bounded the request
+ * to `MEDIA_MAX_UPLOAD_BYTES`. One method also keeps the pair atomic — the bytes a
+ * caller strips are the bytes whose size it just measured, from the same round trip.
  */
 export interface ObjectInspection {
   /** `ContentLength` as the storage server reported it, in bytes. */
@@ -58,6 +78,23 @@ export interface MediaStore {
 
   /** Measure an object and read its leading bytes. Rejects if it is not there. */
   inspect(key: string, headBytes: number): Promise<ObjectInspection>
+
+  /**
+   * Overwrite `key` with `bytes`, which the caller must have read from that same key.
+   *
+   * The only server-side write on the port, and the only one whose `Content-Type` is
+   * worth believing: `complete` passes the type it *measured from the bytes*, not the
+   * client's declaration, so an object that survives this call stops advertising
+   * whatever the browser claimed about it.
+   *
+   * **Rejects** — unlike `remove`, which is best-effort — because the caller's answer
+   * depends on whether the rewrite happened. A failed rewrite leaves the object in place
+   * with its metadata intact, so reporting success would be the one wrong outcome;
+   * `UploadService.complete` catches this, deletes the object, and refuses the upload.
+   * Every failure is translated into an `ApiError` before it gets here, as with every
+   * other storage call.
+   */
+  replace(key: string, bytes: Uint8Array, contentType: string): Promise<void>
 
   /**
    * Delete `key`, best-effort.

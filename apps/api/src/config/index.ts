@@ -135,6 +135,29 @@ const EnvSchema = z.object({
    */
   MEDIA_PRESIGN_TTL_SECONDS: z.coerce.number().int().min(5).max(900).default(60),
 
+  /**
+   * S8-c: strip EXIF/GPS and XMP from an uploaded image before its URL is handed out.
+   *
+   * **DEFAULTED ON, and the default is the point** — this is a required-before-go-live
+   * privacy control, not a tuning knob, and a control that boots off is a control that
+   * stays off. It is not a required key either, by the S6 rule above: a required key is
+   * a CI contract, and CI must run the *on* path with no `.env` present.
+   *
+   * **Why a kill switch exists at all**, since disabling it re-opens the leak: the
+   * stripper refuses any file whose structure it cannot walk to the end, which is the
+   * right call for a bucket that is public but is also a new claim about every photograph
+   * anyone has ever taken. If that claim turns out to be wrong for some real camera's
+   * output — a segment shape this file has never seen — the operator needs to publish
+   * today's post without waiting for a code deploy and a rebuild, and `MEDIA_STRIP_METADATA=false`
+   * plus a restart is that path. It is a *stop-the-bleeding* switch, and the three things
+   * that keep it honest are in `uploads/service.ts` and `uploads/routes.ts`: it logs one
+   * `warn` per upload while off, it says so once at startup, and `strippedBytes` in every
+   * response stays `0` so a client can see the control is not running. There is no plan
+   * in which a production deployment wants this off permanently, and the boot line is
+   * written so that reading the log makes that visible.
+   */
+  MEDIA_STRIP_METADATA: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+
   // ── S6: rate limiting on the write surface ─────────────────────────────────
   //
   // DEFAULTED, NOT REQUIRED — and that is a deliberate departure from the rule the

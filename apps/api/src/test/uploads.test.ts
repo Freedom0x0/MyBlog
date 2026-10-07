@@ -13,6 +13,7 @@ import { buildApp } from '../app.js'
 import { loadConfig } from '../config/index.js'
 import { generateJti } from '../lib/tokens.js'
 import { UPLOAD_KEY_PATTERN } from '../modules/uploads/schema.js'
+import { cleanGif, cleanJpeg, cleanPng, cleanWebp, heicHead, pngPaddedTo } from './imageFixtures.js'
 import { waitForRedis } from './wait-for-redis.js'
 
 /**
@@ -150,24 +151,23 @@ function expectCleanError(response: LightMyRequestResponse, status: number, code
   expect(envelope.error?.code).toBe(code)
 }
 
-// ── fixtures: real magic bytes, short and to the point ───────────────────────
+// ── fixtures: whole files, because `complete` now reads the object and walks it ───
+//
+// These used to be 12- and 24-byte magic-byte stubs. S8-c made that shape *refusable*:
+// a PNG signature plus a truncated IHDR is not a PNG by structure, and the strip step
+// says so. Real (small, hand-encoded) files are used instead, from the same builders the
+// stripper's own tests use — see `imageFixtures.ts` for what is hand-built and what comes
+// out of a real encoder.
 
-const pngBytes = Uint8Array.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-])
+const pngBytes = cleanPng()
+const jpegBytes = cleanJpeg()
+const gifBytes = cleanGif()
 
-const jpegBytes = Uint8Array.from([
-  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
-])
+/** A real RIFF/WEBP container, 64 bytes: the `RIFF`-at-0 and `WEBP`-at-8 pair the sniff needs. */
+const webpBytes = cleanWebp()
 
-const gifBytes = Uint8Array.from([
-  0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
-])
-
-/** 12 readable bytes: `RIFF`, a size, then `WEBP` — the pair the sniff needs both halves of. */
-const webpBytes = new TextEncoder().encode('RIFF\x22\x00\x00\x00WEBPVP8 ')
+/** A 32-byte HEIC head: `ftyp`/`heic`, i.e. an iPhone photo renamed to `.jpg`. */
+const heicBytes = heicHead()
 
 const svgBytes = new TextEncoder().encode(
   '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><circle r="9"/></svg>',
@@ -445,6 +445,10 @@ describe('upload then complete: the verification gate', () => {
       publicUrl: `${config.MEDIA_PUBLIC_BASE_URL}/${signed.key}`,
       contentType: 'image/png',
       sizeBytes: pngBytes.length,
+      // S8-c's field, present and 0: the strip ran, found nothing to take, and did not
+      // rewrite the object. `strippedBytes` is optional in the contract so an older
+      // client keeps validating, but this API always reports the number it has.
+      strippedBytes: 0,
     })
 
     /**
@@ -539,17 +543,44 @@ describe('upload then complete: the verification gate', () => {
   })
 
   it('accepts an object exactly at the cap, so the limit is "up to" and not "under"', async () => {
+    // The object is a real PNG padded by one legitimate `tEXt` chunk. It used to be a
+    // signature followed by a run of zeros, which the size gate accepted and the S8-c
+    // structure walk would refuse — and refusing *at the cap* would have looked like the
+    // cap being wrong, so the fixture had to become a file.
     const signed = (await sign('image/png', TEST_MAX_UPLOAD_BYTES)).json() as PresignedUpload
     issuedKeys.push(signed.key)
 
-    const atCap = new Uint8Array(TEST_MAX_UPLOAD_BYTES)
-    atCap.set(pngBytes)
+    const atCap = pngPaddedTo(TEST_MAX_UPLOAD_BYTES)
+    expect(atCap.length).toBe(TEST_MAX_UPLOAD_BYTES)
 
     expect((await putToSignedUrl(signed.uploadUrl, atCap, 'image/png')).status).toBe(200)
 
     const done = await complete(signed.key)
-    expect(done.statusCode).toBe(200)
-    expect((done.json() as CompletedUpload).sizeBytes).toBe(TEST_MAX_UPLOAD_BYTES)
+    expect(done.statusCode, done.body).toBe(200)
+    const body = done.json() as CompletedUpload
+    expect(body.sizeBytes).toBe(TEST_MAX_UPLOAD_BYTES)
+    // A padding comment is prose, not coordinates: the strip left it alone, so the
+    // published object is the uploaded one, byte for byte.
+    expect(body.strippedBytes).toBe(0)
+    expect(new Uint8Array(await (await fetch(body.publicUrl)).arrayBuffer())).toEqual(atCap)
+  })
+
+  /**
+   * The iPhone case, answered at the gate rather than by the stripper: HEIF/HEIC starts
+   * with a `ftyp` box, so it is neither `FFD8 FF` nor any of the four magics, and a file
+   * renamed to `.jpg` never gets far enough to be looked at for EXIF. Declared as
+   * `image/heic` it does not even get a signature (`ALLOWED_UPLOAD_TYPES`).
+   */
+  it('rejects a HEIC renamed to .jpg on its bytes, not on its name', async () => {
+    expect(heicBytes.length).toBeGreaterThanOrEqual(32)
+
+    const signed = (await sign('image/jpeg', heicBytes.length)).json() as PresignedUpload
+    issuedKeys.push(signed.key)
+    expect((await putToSignedUrl(signed.uploadUrl, heicBytes, 'image/jpeg')).status).toBe(200)
+
+    const done = await complete(signed.key)
+    expectCleanError(done, 415, ERROR_CODES.unsupportedMediaType)
+    await expect(objectExists(signed.key)).resolves.toBe(false)
   })
 
   it('rejects an empty object rather than treating "no signature" as a pass', async () => {

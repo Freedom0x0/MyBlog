@@ -25,6 +25,20 @@ import {
   publicReadPolicy,
   type StorageLog,
 } from '../modules/uploads/s3-store.js'
+import {
+  cleanGif,
+  cleanJpeg,
+  cleanPng,
+  cleanWebp,
+  containsSequence,
+  gpsCoordinateBytes,
+  indexOfBytes,
+  jpegScanTail,
+  jpegWithGpsExif,
+  jpegWithoutScan,
+  pngWithBadCrc,
+  pngWithChunkAfterIend,
+} from './imageFixtures.js'
 
 /**
  * Upload rules with no bucket behind them (stage F, first of two files).
@@ -38,22 +52,26 @@ import {
  * bucket cannot stop the API from booting. Those last two are tested against
  * `http://127.0.0.1:1`, a port nothing listens on, because that is the only way to
  * make a storage failure happen on demand in a test that must run without Docker.
+ *
+ * **The fixtures changed in S8-c, and that is the finding, not the tidy-up.** They used
+ * to be 12- and 24-byte magic-byte stubs, which was enough while the only question
+ * asked of the bytes was "which signature do they start with". `complete` now reads the
+ * object whole and walks its structure, so a stub is *refused* — and refusing them here
+ * is the proof that the new gate reaches the paths the old suite never exercised. They
+ * are now real files with real image data (`imageFixtures.ts`), which also means the
+ * strip assertions below can say "the picture bytes are identical" instead of "the byte
+ * count went down".
  */
 
-// ── fixtures: real leading bytes, not placeholders ───────────────────────────
+// ── fixtures: whole files, not signatures ────────────────────────────────────
 
-const pngBytes = Uint8Array.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // signature
-  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR chunk follows
-])
+const pngBytes = cleanPng()
+const jpegBytes = cleanJpeg()
+const gif89Bytes = cleanGif()
+const webpBytes = cleanWebp()
 
-const jpegBytes = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46])
-
+/** Same four, as the *first bytes* a 32-byte sniff sees — the rejection branches still need those. */
 const gif87Bytes = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x37, 0x61, 0x01, 0x00])
-const gif89Bytes = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00])
-
-/** `RIFF`, a 4-byte little-endian size, then `WEBP` at offset 8 — hence the 12-byte floor. */
-const webpBytes = new TextEncoder().encode('RIFF\x38\x00\x00\x00WEBPVP8 ')
 
 /** Same first four bytes as WebP, different file: catches a sniff that only checks `RIFF`. */
 const aviBytes = new TextEncoder().encode('RIFF\x38\x00\x00\x00AVI LIST')
@@ -67,12 +85,14 @@ const limits: UploadLimits = {
   maxBytes: 1024,
   presignTtlSeconds: 60,
   publicBaseUrl: 'http://media.test/portal-media',
+  stripMetadata: true,
 }
 
 // ── the stand-in that makes the rules observable ─────────────────────────────
 
 interface FakeObject {
   sizeBytes: number
+  /** The object's bytes. `inspect` slices them to whatever count the caller asked for. */
   head: Uint8Array
 }
 
@@ -80,6 +100,18 @@ class FakeStore implements MediaStore {
   readonly presigned: { key: string; contentType: string; ttlSeconds: number }[] = []
   readonly inspected: { key: string; headBytes: number }[] = []
   readonly removed: string[] = []
+  readonly replaced: { key: string; bytes: Uint8Array; contentType: string }[] = []
+
+  /**
+   * What `inspect` returns on the *second* call, which is the strip's full-object read.
+   * A rule about "the object changed under verification" is only testable by a store
+   * that can say something different the second time, and no real bucket is willing to
+   * be that inconsistent on schedule.
+   */
+  secondInspection: ObjectInspection | null = null
+
+  /** When set, `replace` rejects with this instead of recording the write. */
+  replaceFailure: Error | null = null
 
   constructor(private readonly object: FakeObject | null = null) {}
 
@@ -93,6 +125,13 @@ class FakeStore implements MediaStore {
 
   async inspect(key: string, headBytes: number): Promise<ObjectInspection> {
     this.inspected.push({ key, headBytes })
+
+    if (this.secondInspection !== null && this.inspected.length > 1) {
+      const second = this.secondInspection
+      this.secondInspection = null
+      return second
+    }
+
     if (this.object === null) {
       throw new ApiError(ERROR_CODES.notFound, 'No uploaded object exists at that key', 404)
     }
@@ -100,6 +139,11 @@ class FakeStore implements MediaStore {
       sizeBytes: this.object.sizeBytes,
       head: this.object.head.subarray(0, headBytes),
     }
+  }
+
+  async replace(key: string, bytes: Uint8Array, contentType: string): Promise<void> {
+    if (this.replaceFailure !== null) throw this.replaceFailure
+    this.replaced.push({ key, bytes, contentType })
   }
 
   async remove(key: string): Promise<void> {
@@ -339,10 +383,16 @@ describe('POST /api/v1/uploads/complete rules (verify)', () => {
     expect(store.removed).toEqual([])
   })
 
-  it('asks the store for the size and the head in one call', async () => {
-    const store = new FakeStore({ sizeBytes: 70, head: pngBytes })
+  it('reads the head for the gates, then the whole object for the strip', async () => {
+    const store = new FakeStore({ sizeBytes: pngBytes.length, head: pngBytes })
     await new UploadService(store, limits).complete({ key: keyFor('png') })
-    expect(store.inspected).toEqual([{ key: keyFor('png'), headBytes: UPLOAD_HEAD_SNIFF_BYTES }])
+
+    // Two calls, and the second one's count is the upload cap rather than 32 because the
+    // size gate in between has already proved the object cannot be bigger than that.
+    expect(store.inspected).toEqual([
+      { key: keyFor('png'), headBytes: UPLOAD_HEAD_SNIFF_BYTES },
+      { key: keyFor('png'), headBytes: limits.maxBytes },
+    ])
   })
 
   it('accepts a real PNG and returns the URL that was earned', async () => {
@@ -352,8 +402,10 @@ describe('POST /api/v1/uploads/complete rules (verify)', () => {
       publicUrl: `http://media.test/portal-media/${keyFor('png')}`,
       contentType: 'image/png',
       sizeBytes: 70,
+      strippedBytes: 0,
     })
     expect(store.removed).toEqual([]) // accepted means it stays
+    expect(store.replaced).toEqual([]) // and a file with nothing to take is not rewritten
   })
 
   it('never lets a config value double up the slash in the URL', async () => {
@@ -437,7 +489,164 @@ describe('POST /api/v1/uploads/complete rules (verify)', () => {
       publicUrl: `http://media.test/portal-media/${keyFor('gif')}`,
       contentType: 'image/gif',
       sizeBytes: 900,
+      strippedBytes: 0,
     })
+    // GIF is the format the stripper declines (see `lib/imageMetadata.ts`): nothing is
+    // taken out, so nothing is written back, and the object a visitor gets is the object
+    // the browser PUT.
+    expect(store.replaced).toEqual([])
+  })
+})
+
+describe('metadata stripping in complete (S8-c)', () => {
+  const gps = gpsCoordinateBytes()
+  const exifJpeg = jpegWithGpsExif()
+
+  function recordingLog(): { entries: unknown[]; log: NonNullable<UploadLimits['log']> } {
+    const entries: unknown[] = []
+    const record = (object: unknown): void => {
+      entries.push(object)
+    }
+    return { entries, log: { info: record, warn: record, error: record } }
+  }
+
+  it('takes the GPS out and overwrites the object before the URL is reported', async () => {
+    const key = keyFor('jpg')
+    const store = new FakeStore({ sizeBytes: exifJpeg.length, head: exifJpeg })
+    const result = await new UploadService(store, limits).complete({ key })
+
+    expect(store.replaced).toHaveLength(1)
+    const [written] = store.replaced
+    expect(written?.key).toBe(key)
+    expect(written?.contentType).toBe('image/jpeg') // the measured type, not the declared one
+    expect(containsSequence(written?.bytes ?? new Uint8Array(0), gps)).toBe(false)
+
+    // What the caller is told reflects the object as it now stands, not as it arrived.
+    expect(result.sizeBytes).toBe(exifJpeg.length - 195)
+    expect(result.strippedBytes).toBe(195)
+    expect(result.publicUrl).toBe(`http://media.test/portal-media/${key}`)
+    expect(store.removed).toEqual([])
+  })
+
+  it('publishes a metadata-free image without writing to the bucket at all', async () => {
+    const store = new FakeStore({ sizeBytes: pngBytes.length, head: pngBytes })
+    const result = await new UploadService(store, limits).complete({ key: keyFor('png') })
+
+    expect(store.replaced).toEqual([])
+    expect(result.strippedBytes).toBe(0)
+    expect(result.sizeBytes).toBe(pngBytes.length)
+  })
+
+  it('refuses a file whose structure it cannot walk, and deletes it rather than publishing it', async () => {
+    // `jpegWithoutScan` is a real marker chain with real EXIF and no picture: the parser
+    // cannot say where the metadata ends, and "we could not prove there are no
+    // coordinates" is decided as a refusal. Same for the PNG with an eXIf chunk welded on
+    // after IEND — the one place a stripper that stops at the container's end would miss.
+    const cases: [string, Uint8Array][] = [
+      [keyFor('jpg'), jpegWithoutScan()],
+      [keyFor('png'), pngWithChunkAfterIend()],
+      [keyFor('png'), pngWithBadCrc()],
+    ]
+
+    for (const [key, bytes] of cases) {
+      const store = new FakeStore({ sizeBytes: bytes.length, head: bytes })
+      const error = await expectApiError(new UploadService(store, limits).complete({ key }))
+
+      expect(error.statusCode, key).toBe(415)
+      expect(error.code, key).toBe(ERROR_CODES.unsupportedMediaType)
+      expect(store.removed, `${key} must not survive the refusal`).toEqual([key])
+      expect(store.replaced, key).toEqual([])
+    }
+  })
+
+  it('says what could not be proven, in the client\'s own language and with no server detail', async () => {
+    const store = new FakeStore({ sizeBytes: 600, head: jpegWithoutScan() })
+    const error = await expectApiError(new UploadService(store, limits).complete({ key: keyFor('jpg') }))
+
+    // 415 messages are forwarded verbatim by `errorHandler`, so this is the leak check.
+    expect(error.message).toContain('could not be checked for location data')
+    expect(error.message).not.toContain('portal-media')
+    expect(error.message).not.toContain('\\')
+    expect(error.message).not.toMatch(/[a-zA-Z]:[\\/]/)
+  })
+
+  it('refuses when the object changes between the two measurements, because the gates judged the other one', async () => {
+    const key = keyFor('jpg')
+    const store = new FakeStore({ sizeBytes: cleanJpeg().length, head: cleanJpeg() })
+    // Same key, different bytes on the strip's read: the window is real (a signed PUT
+    // stays usable until it expires) and this is the only place it is closed. Both files
+    // are valid JPEGs, so nothing but the identity of the object can be the reason.
+    store.secondInspection = { sizeBytes: exifJpeg.length, head: exifJpeg }
+
+    const error = await expectApiError(new UploadService(store, limits).complete({ key }))
+    expect(error.statusCode).toBe(409)
+    expect(error.code).toBe(ERROR_CODES.conflict)
+    expect(store.removed).toEqual([key])
+    expect(store.replaced).toEqual([])
+  })
+
+  it('deletes the object and reports the storage failure when the rewrite itself fails', async () => {
+    // Fail closed, out loud. If `replace` rejects, the metadata-bearing object is still in
+    // a public bucket, so the only acceptable answers are "it is gone" and "we did not
+    // publish it" — never a 200 with a URL.
+    const key = keyFor('jpg')
+    const store = new FakeStore({ sizeBytes: exifJpeg.length, head: exifJpeg })
+    const storageError = new ApiError(ERROR_CODES.internalError, 'Media storage operation failed', 500)
+    store.replaceFailure = storageError
+
+    const { entries, log } = recordingLog()
+    const error = await expectApiError(new UploadService(store, { ...limits, log }).complete({ key }))
+
+    expect(error).toBe(storageError)
+    expect(store.removed).toEqual([key])
+    expect(entries).toHaveLength(0) // the adapter already logged it; the service does not log a 5xx twice
+  })
+
+  it('logs which containers left, so an operator can see the control working', async () => {
+    const { entries, log } = recordingLog()
+    const store = new FakeStore({ sizeBytes: exifJpeg.length, head: exifJpeg })
+    await new UploadService(store, { ...limits, log }).complete({ key: keyFor('jpg') })
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      key: keyFor('jpg'),
+      format: 'JPEG',
+      removedBytes: 195,
+      containers: ['APP1/Exif'],
+    })
+  })
+
+  it('does nothing at all when the kill switch is off, and says so on every upload', async () => {
+    const { entries, log } = recordingLog()
+    const store = new FakeStore({ sizeBytes: exifJpeg.length, head: exifJpeg })
+    const result = await new UploadService(store, { ...limits, stripMetadata: false, log }).complete({
+      key: keyFor('jpg'),
+    })
+
+    // One read, not two: the full-object fetch is part of the strip, so switching it off
+    // also switches off the extra round trip.
+    expect(store.inspected).toEqual([{ key: keyFor('jpg'), headBytes: UPLOAD_HEAD_SNIFF_BYTES }])
+    expect(store.replaced).toEqual([])
+    expect(result.strippedBytes).toBe(0)
+    expect(result.sizeBytes).toBe(exifJpeg.length)
+    expect(entries).toHaveLength(1)
+  })
+
+  it('keeps a GPS-bearing image out of the response even when nothing else about it is wrong', async () => {
+    // The point of the stage, stated as one assertion: after a successful `complete`, the
+    // bytes we would have written contain no coordinates. The end-to-end version of this
+    // — fetched anonymously, from the bucket — is in `uploads-strip.test.ts`.
+    const store = new FakeStore({ sizeBytes: exifJpeg.length, head: exifJpeg })
+    await new UploadService(store, limits).complete({ key: keyFor('jpg') })
+
+    const written = store.replaced[0]?.bytes
+    expect(written).toBeDefined()
+    expect(containsSequence(written ?? new Uint8Array(0), gps)).toBe(false)
+    expect(containsSequence(exifJpeg, gps)).toBe(true)
+    // and the picture part of it came through untouched
+    expect(written?.subarray(indexOfBytes(written ?? new Uint8Array(0), Uint8Array.from([0xff, 0xda])))).toEqual(
+      jpegScanTail(exifJpeg),
+    )
   })
 })
 

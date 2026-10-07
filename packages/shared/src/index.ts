@@ -395,14 +395,25 @@ export interface CompleteUploadInput {
  * `publicUrl` is safe to write into `articles.cover_image`.
  *
  * `contentType` is the type *measured from the bytes*, not the type the client
- * declared, and `sizeBytes` is likewise the server's number. A caller that wants
- * to display dimensions or reject a file by real weight has those here rather than
- * having to trust its own `File` object.
+ * declared, and `sizeBytes` is likewise the server's number — of the object as it now
+ * stands in the bucket, which since S8-c may be smaller than what was uploaded. A
+ * caller that wants to display dimensions or reject a file by real weight has those
+ * here rather than having to trust its own `File` object.
  */
 export interface CompletedUpload {
   publicUrl: string
   contentType: string
   sizeBytes: number
+  /**
+   * Bytes of metadata container the server cut out of the object before publishing it
+   * (S8-c: EXIF/GPS and XMP, removed losslessly — the picture data is byte-identical).
+   *
+   * Optional for the same reason every addition to a response is optional: the admin UI
+   * was written against three fields and is not this stage's file to edit. Present and
+   * `0` means the strip ran and found nothing to take; absent means an API build that
+   * never looked. `sizeBytes` is always the size that is actually being served.
+   */
+  strippedBytes?: number
 }
 
 export interface CommentAuthor {

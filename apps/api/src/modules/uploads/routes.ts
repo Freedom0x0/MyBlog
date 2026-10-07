@@ -20,7 +20,22 @@ export const uploadRoutes: FastifyPluginAsyncZod = async (app) => {
     maxBytes: app.config.MEDIA_MAX_UPLOAD_BYTES,
     presignTtlSeconds: app.config.MEDIA_PRESIGN_TTL_SECONDS,
     publicBaseUrl: app.config.MEDIA_PUBLIC_BASE_URL,
+    stripMetadata: app.config.MEDIA_STRIP_METADATA,
+    log: app.log,
   })
+
+  /**
+   * Said once at startup rather than discovered later, because everything this line is
+   * warning about is silent per request: uploads keep answering 200, images keep
+   * publishing, and the only difference is that a phone's coordinates go out with them.
+   * `MEDIA_STRIP_METADATA` defaults to `true`, so this branch means someone set it.
+   */
+  if (!app.config.MEDIA_STRIP_METADATA) {
+    app.log.warn(
+      'MEDIA_STRIP_METADATA=false: uploaded images keep their EXIF/GPS and XMP, and the media bucket is public. ' +
+        'This is the emergency escape hatch for a parser that refuses real photographs, not a setting to ship with.',
+    )
+  }
 
   /**
    * Sign a PUT. `requireAdmin` then `requireCsrfHeader`, in that order, exactly as

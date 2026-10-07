@@ -83,6 +83,14 @@ export const UPLOAD_KEY_PATTERN = /^uploads\/\d{4}\/\d{2}\/[0-9a-f]{32}\.(png|jp
  * else that starts with `RIFF` (a WAV or an AVI). 32 also covers every PNG chunk
  * header and enough of a JPEG's first marker segment to be company policy-baiting
  * cheap — the object is already in memory on the server's side of a ranged GET.
+ *
+ * **This is the sniff's budget, not the module's.** The metadata strip in
+ * `complete` reads the object whole, because a JPEG's `APP1` marker sits at byte 2
+ * and the coordinates inside it are a hundred-odd bytes further in — past anything a
+ * leading window reaches (measured on the suite's fixture: byte 141 of 827). Raising
+ * this constant to cover that would make every *rejection* path — an oversized object,
+ * a lying extension — pull `MEDIA_MAX_UPLOAD_BYTES` out of MinIO to decide something
+ * 32 bytes already answer.
  */
 export const UPLOAD_HEAD_SNIFF_BYTES = 32
 
@@ -133,10 +141,21 @@ export const PresignedUploadSchema = z.object({
   expiresAt: z.iso.datetime(),
 })
 
+/**
+ * `POST /api/v1/uploads/complete` result.
+ *
+ * `strippedBytes` is S8-c's, and it is **optional** in both senses: optional in the
+ * schema, so a client built before the field existed keeps validating, and reported as
+ * `0` rather than omitted when the strip ran and found nothing, so a caller can tell
+ * "checked, clean" apart from "an older API that never checked". What the admin UI would
+ * do with it later — a line under the thumbnail saying how much location data was
+ * removed — is deliberately not decided here; that file is not this stage's to edit.
+ */
 export const CompletedUploadSchema = z.object({
   publicUrl: z.string(),
   contentType: z.string(),
   sizeBytes: z.number().int().nonnegative(),
+  strippedBytes: z.number().int().nonnegative().optional(),
 })
 
 /**

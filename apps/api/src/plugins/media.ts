@@ -16,10 +16,10 @@ declare module 'fastify' {
     /**
      * Resolves if the media bucket answers; throws if it does not.
      *
-     * A separate decorator rather than a fourth `MediaStore` method: the port is
-     * three methods so the upload rules can never reach a bucket-level operation,
-     * and adding `ping()` to it would put that door back open for the one consumer
-     * that has no business writing to storage.
+     * A separate decorator rather than a fifth `MediaStore` method: the port is four
+     * object-scoped methods so the upload rules can never reach a bucket-level
+     * operation, and adding `ping()` to it would put that door back open for the one
+     * consumer that has no business writing to storage.
      */
     mediaReady: () => Promise<void>
   }

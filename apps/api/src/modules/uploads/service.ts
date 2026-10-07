@@ -7,6 +7,7 @@ import {
   type RequestUploadInput,
 } from 'shared'
 import { ApiError } from '../../errors.js'
+import { ImageParseError, stripImageMetadata } from '../../lib/imageMetadata.js'
 import {
   ALLOWED_UPLOAD_TYPES,
   MIME_BY_KEY_EXTENSION,
@@ -24,7 +25,8 @@ import type { MediaStore } from './store.js'
  * here it buys something specific: every branch of the verification can be driven by
  * a `MediaStore` stand-in that returns whatever bytes and size we name, including
  * combinations a real bucket makes expensive to produce (a 6 MB object, an SVG that
- * claims to be a PNG, an object that vanished between two calls).
+ * claims to be a PNG, an object that vanished between two calls, an EXIF segment whose
+ * GPS needs deleting).
  */
 
 export interface UploadLimits {
@@ -34,6 +36,25 @@ export interface UploadLimits {
   presignTtlSeconds: number
   /** Public origin + bucket path, used only to prefix a key we already shape-checked. */
   publicBaseUrl: string
+  /**
+   * Whether the metadata strip runs. Comes from `MEDIA_STRIP_METADATA`, whose default is
+   * `true`; `false` is the documented escape hatch for a parser that turns out to refuse
+   * real photographs, and it is the reason the flag is passed in rather than hardcoded.
+   */
+  stripMetadata: boolean
+  /**
+   * The slice of a logger the strip uses, named narrowly the way `s3-store.ts` names its
+   * own four methods: production passes `app.log`, and a unit test passes a recording
+   * stub. A control that can be switched off silently is a control nobody can trust six
+   * months later, which is what the two log lines below exist to prevent.
+   */
+  log?: UploadLog
+}
+
+export interface UploadLog {
+  info(object: unknown, message?: string): void
+  warn(object: unknown, message?: string): void
+  error(object: unknown, message?: string): void
 }
 
 /** PNG's 8-byte signature, which is also a self-check: bytes 4-7 are the CRLF/LF of the file format. */
@@ -220,6 +241,101 @@ export class UploadService {
       )
     }
 
+    /**
+     * ── S8-c: take the coordinates out before the URL becomes worth publishing ──
+     *
+     * Everything above proves the object *is* an image of the type its key says. None of
+     * it proves the image is *not* a phone photograph with a GPS IFD in it, and since
+     * stage F the bucket has been publicly readable, so an unstripped upload is a
+     * location leak with a URL. The read that fixes that has to be the whole object:
+     * `UPLOAD_HEAD_SNIFF_BYTES` is 32 and a real EXIF segment starts at byte 4 and runs
+     * to byte 200+ — `imageMetadata.test.ts` measures the fixture's coordinates at 141.
+     *
+     * Two properties this step keeps:
+     *
+     * 1. **Nothing is published that we could not read.** A structure the parser cannot
+     *    walk to its end is a refusal, not a pass-through: `lib/imageMetadata.ts` throws
+     *    rather than returning the input, and the refusal here deletes the object, same
+     *    as every other rejection in this file. "We cannot prove this image has no
+     *    coordinates" must not turn into "publish it anyway".
+     * 2. **The bytes stripped are the bytes verified.** `inspect` is called a second
+     *    time and both of its numbers are compared against the first call's, because a
+     *    signed PUT stays usable until it expires and an object replaced in that window
+     *    is a different object. If either disagrees, nothing is published.
+     */
+    let storedBytes = inspected.sizeBytes
+    let strippedBytes = 0
+
+    if (this.limits.stripMetadata) {
+      const full = await this.store.inspect(input.key, this.limits.maxBytes)
+
+      if (full.sizeBytes !== inspected.sizeBytes || !startsWithBytes(full.head, inspected.head)) {
+        // The bytes we just read are not the bytes the gates above were decided on.
+        // 409 rather than 415 because nothing about the file is wrong — its *identity*
+        // is, and the fix is to upload it again, so the message says that.
+        await this.store.remove(input.key)
+        throw new ApiError(
+          ERROR_CODES.conflict,
+          'The uploaded object changed while it was being verified, so it was not published. Upload it again.',
+          409,
+        )
+      }
+
+      let result: ReturnType<typeof stripImageMetadata>
+
+      try {
+        result = stripImageMetadata(full.head, sniffed)
+      } catch (error) {
+        await this.store.remove(input.key)
+
+        if (error instanceof ImageParseError) {
+          // `reason` is one of this module's own sentences about the file's structure —
+          // byte offsets and format words, never anything a foreign library produced —
+          // and a caller who is being refused needs to know what to re-save.
+          throw new ApiError(
+            ERROR_CODES.unsupportedMediaType,
+            `This ${sniffed} image could not be checked for location data, so it was not published: ${error.reason}`,
+            415,
+          )
+        }
+
+        // Not a parse failure: a bug, or something we did not predict. Logged whole,
+        // reported as a refusal — the object is gone either way and the coordinates
+        // never go public.
+        this.limits.log?.error({ err: error, key: input.key }, 'unexpected failure while stripping image metadata')
+        throw new ApiError(
+          ERROR_CODES.unsupportedMediaType,
+          `This ${sniffed} image could not be checked for location data, so it was not published.`,
+          415,
+        )
+      }
+
+      if (result.removedBytes > 0) {
+        try {
+          // The *measured* type, not the declared one: this is the only write in the
+          // pipeline whose Content-Type is a statement we can stand behind.
+          await this.store.replace(input.key, result.bytes, sniffed)
+        } catch (error) {
+          // Fail closed. A failed rewrite means the object in the bucket still carries
+          // what came out of the camera, so it is deleted and the error the adapter
+          // already translated is what the caller sees.
+          await this.store.remove(input.key)
+          throw error
+        }
+
+        this.limits.log?.info(
+          { key: input.key, format: result.format, removedBytes: result.removedBytes, containers: result.containers },
+          'stripped image metadata before publishing the object',
+        )
+        strippedBytes = result.removedBytes
+        storedBytes = result.bytes.length
+      }
+    } else if (this.limits.log) {
+      // One line per upload keeps the escape hatch visible in the logs of a box where it
+      // has been switched off, which is the only way anyone finds out months later.
+      this.limits.log.warn({ key: input.key }, 'MEDIA_STRIP_METADATA is false: image metadata was left in place')
+    }
+
     return {
       // Assembled from config plus a key that just passed a strict shape check — the
       // only two ingredients this line is allowed to use. Nothing from the client's
@@ -227,7 +343,16 @@ export class UploadService {
       // reported here is the one measured from the bytes.
       publicUrl: `${this.limits.publicBaseUrl.replace(/\/+$/, '')}/${input.key}`,
       contentType: sniffed,
-      sizeBytes: inspected.sizeBytes,
+      sizeBytes: storedBytes,
+      // Reported even when it is 0, so a client can tell "we looked and there was
+      // nothing to take" apart from a build that never asked the question.
+      strippedBytes,
     }
   }
+}
+
+/** Do the first `basis.length` bytes of `candidate` match `basis`? Used to prove two reads saw one object. */
+function startsWithBytes(candidate: Uint8Array, basis: Uint8Array): boolean {
+  if (candidate.length < basis.length) return false
+  return basis.every((byte, index) => candidate[index] === byte)
 }

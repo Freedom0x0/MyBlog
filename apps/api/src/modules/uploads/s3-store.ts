@@ -247,6 +247,29 @@ export function createS3MediaStore({
     },
 
     /**
+     * The server rewriting its own object — see `MediaStore.replace` for why this is the
+     * one write on the port and what has to be true before it is called.
+     *
+     * `Body` is the bytes the caller read from this same key a moment ago, and
+     * `ContentType` is the type measured from them. No checksum option is set here and
+     * none is needed: `createMediaS3Client` already pins request checksum calculation to
+     * `WHEN_REQUIRED`, so this PUT goes out with a plain `Content-Length` — which is the
+     * right shape for a server-side call and the same one SPIKE-E measured for the
+     * browser's PUT.
+     */
+    async replace(key, bytes, contentType): Promise<void> {
+      try {
+        await client.send(
+          new PutObjectCommand({ Bucket: bucket, Key: key, Body: bytes, ContentType: contentType }),
+        )
+      } catch (error) {
+        // Translated like every other SDK call, and it *rejects*: the caller has to know
+        // whether the metadata-bearing object is still sitting in a public bucket.
+        throw translate(error, 'put', log)
+      }
+    },
+
+    /**
      * Best-effort by contract (see `store.ts`): a failure here is logged and
      * swallowed so the caller's 413/415 is never replaced by a 5xx about us.
      */
@@ -332,10 +355,10 @@ export function publicReadPolicy(bucket: string): string {
  * One `HeadBucket`, no recovery: this exists for `/ready`, which needs to answer
  * "is the media store reachable?" and nothing else.
  *
- * It is deliberately NOT a method on `MediaStore`. The port is three methods by
- * design (`store.ts`) so the upload rules can never reach bucket-level operations;
- * a readiness probe is a different consumer and gets its own function, which keeps
- * "the rules layer cannot create or re-policy a bucket" true.
+ * It is deliberately NOT a method on `MediaStore`. The port is four object-scoped
+ * methods by design (`store.ts`) so the upload rules can never reach a bucket-level
+ * operation; a readiness probe is a different consumer and gets its own function, which
+ * keeps "the rules layer cannot create or re-policy a bucket" true.
  */
 export async function checkMediaBucket({
   client,
