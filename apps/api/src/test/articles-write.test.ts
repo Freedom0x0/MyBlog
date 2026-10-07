@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify'
 import { ERROR_CODES, type ArticleAdmin, type ArticlePage, type CommentList } from 'shared'
 import { buildApp } from '../app.js'
 import { ArticleRepository } from '../modules/articles/repository.js'
@@ -69,6 +69,91 @@ async function getJson<T>(url: string) {
 async function articleIdBySlug(value: string): Promise<string | null> {
   const { rows } = await app.db.query<{ id: string }>(`select id from articles where slug = $1`, [value])
   return rows[0]?.id ?? null
+}
+
+/**
+ * Total rows in `articles`, for the "the refusal wrote nothing" proofs.
+ *
+ * A global count is meaningful here only because `vitest.config.ts` sets
+ * `fileParallelism: false`, so no other test file writes while this one runs. It is
+ * always compared against itself before/after and never to a hard-coded number, so
+ * what other suites leave behind cannot break the assertion — the same shape
+ * `articleCount()` has in `articles-import.test.ts`.
+ */
+async function articleCount(): Promise<number> {
+  const { rows } = await app.db.query<{ n: number }>('select count(*)::int as n from articles')
+  return rows[0]!.n
+}
+
+interface StoredArticle {
+  slug: string
+  title: string
+}
+
+/** The stored row behind a slug: the fields a refused write must not move. */
+async function storedArticle(value: string): Promise<StoredArticle | null> {
+  const { rows } = await app.db.query<StoredArticle>(
+    `select slug, title from articles where slug = $1`,
+    [value],
+  )
+  return rows[0] ?? null
+}
+
+/**
+ * A "the row is still there and still says exactly what it said" control.
+ *
+ * Snapshots now and returns the checker to run after the refused call, so a guard
+ * that answers 401/403 *after* doing the damage passes the status assertion and
+ * fails this one. Snapshotting inside the returned closure instead would compare
+ * the damage against itself and assert nothing at all.
+ */
+async function rowUntouched(value: string, why: string): Promise<() => Promise<void>> {
+  const before = await storedArticle(value)
+  // Without this the `toEqual` below would compare `null` with `null` and pass on a
+  // fixture that was never created — an empty assertion wearing a green badge (the
+  // trap `storedRows([])` refuses to walk into in articles-import.test.ts).
+  if (before === null) {
+    throw new Error(`fixture row ${value} is missing; the untouched-check would assert on nothing`)
+  }
+
+  return async () => {
+    const after = await storedArticle(value)
+    expect(after, `${why}: ${value} is gone`).not.toBeNull()
+    expect(after, why).toEqual(before)
+  }
+}
+
+/** Body every fixture here uses; `title` is what the untouched-check reads back. */
+const fixture = { title: 'Pristine', excerpt: 'e', content: 'c', category: 'D', tags: [] }
+
+/** Creates the row a refused PATCH/DELETE must leave alone. */
+async function createTarget(value: string): Promise<void> {
+  const created = await postArticle({ slug: value, ...fixture })
+  if (created.statusCode !== 201) {
+    throw new Error(`fixture ${value} was not created (got ${created.statusCode}: ${created.body})`)
+  }
+}
+
+/** A refused write: the call, the row it needs beforehand, and the proof it did not land. */
+interface WriteRefusal {
+  name: string
+  /** Sets up `value` as the row this call is refused against. */
+  prepare: (value: string) => Promise<void>
+  run: (value: string, headers: Record<string, string>) => Promise<LightMyRequestResponse>
+  guard: (value: string) => Promise<() => Promise<void>>
+}
+
+/**
+ * One fixture row per (verb, refusal) pair, keyed by the test's own label.
+ *
+ * Sharing a single target across the three refusals would let an earlier red poison
+ * a later one's baseline: once a mutation had already rewritten the title, the next
+ * test would snapshot the damaged value and pass by comparing damage with damage.
+ * `newSlug` registers every name here, so all of it still falls inside `afterAll`'s
+ * sweep by slug.
+ */
+function ownTarget(name: string, refusal: string): string {
+  return newSlug(`${name}-${refusal}`.toLowerCase())
 }
 
 beforeAll(async () => {
@@ -447,47 +532,93 @@ describe('DELETE /api/v1/articles/:slug', () => {
 })
 
 describe('write endpoints authorisation — reverse tests (closes S2 gap)', () => {
-  const methods = [
-    { name: 'POST', run: () => postArticle({ slug: slug('authz'), title: 'A', excerpt: 'e', content: 'c', category: 'D', tags: [] }, {}) },
-    { name: 'PATCH', run: () => patchArticle(slug('authz'), { title: 'A' }, {}) },
-    { name: 'DELETE', run: () => deleteArticle(slug('authz'), {}) },
+  /**
+   * Every case here now aims at a row that exists (or, for POST, at a slug that must
+   * stay free) — and says so in its title with "and writes nothing".
+   *
+   * The previous version pointed PATCH and DELETE at `slug('authz')`, a row that was
+   * never in the table, so all it could observe was the answer the endpoint gave. A
+   * guard raised *after* the UPDATE/DELETE ran would still have answered 403 with the
+   * right `error.code`, on a table it had just damaged, and passed. Status assertions
+   * cannot see that; the bracketed row read can.
+   */
+  const methods: WriteRefusal[] = [
+    {
+      name: 'POST',
+      // A POST's "before" state is the absence of a row, so there is nothing to
+      // prepare — and the row it must not create is named here, so were the guard
+      // ever to fail open the inserted row still sits inside `afterAll`'s sweep
+      // instead of poisoning the seed baseline later count assertions read.
+      prepare: async () => {},
+      run: (value, headers) => postArticle({ slug: value, ...fixture }, headers),
+      guard: async (value) => {
+        const before = await articleCount()
+        return async () => {
+          expect(await articleCount(), `a refused POST still inserted ${value}`).toBe(before)
+          expect(await storedArticle(value), `a refused POST still created ${value}`).toBeNull()
+        }
+      },
+    },
+    {
+      name: 'PATCH',
+      prepare: createTarget,
+      run: (value, headers) => patchArticle(value, { title: 'Rewritten by a refused call' }, headers),
+      guard: (value) => rowUntouched(value, 'a refused PATCH still rewrote the row'),
+    },
+    {
+      name: 'DELETE',
+      prepare: createTarget,
+      run: (value, headers) => deleteArticle(value, headers),
+      guard: (value) => rowUntouched(value, 'a refused DELETE still removed the row'),
+    },
   ]
 
-  for (const { name, run } of methods) {
-    it(`${name} without any credentials is 401`, async () => {
-      const response = await run()
+  for (const { name, prepare, run, guard } of methods) {
+    it(`${name} without any credentials is 401 and writes nothing`, async () => {
+      // 401 rather than 403: `requireAdmin` awaits the auth check inside itself, so
+      // an unauthenticated admin write fails on *who you are* before the role is
+      // ever consulted.
+      const value = ownTarget(name, 'no-credentials')
+      await prepare(value)
+      const check = await guard(value)
+
+      const response = await run(value, {})
+
       expect(response.statusCode).toBe(401)
       expect(response.json().error.code).toBe(ERROR_CODES.unauthorized)
+      await check()
     })
   }
 
-  for (const { name } of methods) {
-    it(`${name} as an authenticated non-admin is 403`, async () => {
+  for (const { name, prepare, run, guard } of methods) {
+    it(`${name} as an authenticated non-admin is 403 and writes nothing`, async () => {
+      const value = ownTarget(name, 'non-admin')
+      await prepare(value)
+      const check = await guard(value)
+
       const headers = { authorization: `Bearer ${tokenFor(users.plain)}`, 'x-requested-with': 'portal' }
-      const response = await (name === 'POST'
-        ? postArticle({ slug: slug('authz'), title: 'A', excerpt: 'e', content: 'c', category: 'D', tags: [] }, headers)
-        : name === 'PATCH'
-          ? patchArticle(slug('authz'), { title: 'A' }, headers)
-          : deleteArticle(slug('authz'), headers))
+      const response = await run(value, headers)
 
       expect(response.statusCode).toBe(403)
       expect(response.json().error.code).toBe(ERROR_CODES.forbidden)
+      await check()
     })
   }
 
-  for (const { name } of methods) {
-    it(`${name} as an admin missing the CSRF header is 403 CSRF_CHECK_FAILED`, async () => {
+  for (const { name, prepare, run, guard } of methods) {
+    it(`${name} as an admin missing the CSRF header is 403 CSRF_CHECK_FAILED and writes nothing`, async () => {
       // Admin is authorised, but the header is the last line — and it is enforced
       // on all three verbs, not only POST (design §5's named trap).
+      const value = ownTarget(name, 'missing-csrf')
+      await prepare(value)
+      const check = await guard(value)
+
       const headers = { authorization: `Bearer ${tokenFor(users.admin)}` }
-      const response = await (name === 'POST'
-        ? postArticle({ slug: slug('authz'), title: 'A', excerpt: 'e', content: 'c', category: 'D', tags: [] }, headers)
-        : name === 'PATCH'
-          ? patchArticle(slug('authz'), { title: 'A' }, headers)
-          : deleteArticle(slug('authz'), headers))
+      const response = await run(value, headers)
 
       expect(response.statusCode).toBe(403)
       expect(response.json().error.code).toBe(ERROR_CODES.csrfCheckFailed)
+      await check()
     })
   }
 })

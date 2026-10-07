@@ -471,6 +471,52 @@ describe('CSRF guard', () => {
 
     expect(response.statusCode).toBe(204)
   })
+
+  /**
+   * The highest-value row of the CSRF surface, and the one that had no coverage at
+   * all: every other refresh call in this file sends `x-requested-with` alongside
+   * its cookie, so deleting `requireCsrfHeader` from the refresh route's `onRequest`
+   * turned nothing red.
+   *
+   * Refresh is exactly where that gap matters most. Its credential is a cookie with
+   * `SameSite=Lax`, which a cross-site *top-level navigation* does attach — so an
+   * absent guard here has a live exploit shape, not a theoretical one (contrast the
+   * header on the article writes, whose credential is an `Authorization` header a
+   * cross-site request cannot set at all).
+   *
+   * The second half is what makes this a guard rather than a status check: a 403
+   * raised *after* the rotation would refuse the call and still spend the token,
+   * killing the session anyway. Nothing else in this file would notice, because
+   * every other refresh assertion either sends the header or already expects 401.
+   */
+  it('refuses a refresh with no custom header, and the refusal spends nothing', async () => {
+    const { cookies } = await login()
+    const original = cookieValue(cookies, 'portal_refresh')
+
+    const refused = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: { cookie: original },
+    })
+
+    expect(refused.statusCode).toBe(403)
+    expect(refused.json().error.code).toBe(ERROR_CODES.csrfCheckFailed)
+    // The guard runs in `onRequest`, before the handler exists: a refusal that had
+    // already attached a rotated pair would hand a fresh credential to a response
+    // nobody authorised.
+    expect(setCookies(refused.headers), 'a CSRF refusal must not touch the session').toHaveLength(0)
+
+    // The same credential, this time with the header, still renews — proof the 403
+    // above consumed nothing. Rotate-then-refuse lands here as 401.
+    const renewed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: { cookie: original, 'x-requested-with': 'portal' },
+    })
+
+    expect(renewed.statusCode).toBe(200)
+    expect(cookieValue(setCookies(renewed.headers), 'portal_refresh')).not.toBe(original)
+  })
 })
 
 // ── refresh and logout ────────────────────────────────────────────────────────
@@ -496,6 +542,9 @@ describe('refresh and logout', () => {
       headers: { cookie: original, 'x-requested-with': 'portal' },
     })
     expect(replay.statusCode).toBe(401)
+    // Pinned to the code, not just the status: a 401 is also what the absent- and
+    // expired-credential paths answer, and telling those apart is the contract.
+    expect(replay.json().error.code).toBe(ERROR_CODES.unauthorized)
 
     // Reuse killed the whole family, so the legitimate replacement is dead too.
     const afterReplay = await app.inject({
@@ -504,6 +553,26 @@ describe('refresh and logout', () => {
       headers: { cookie: replacement, 'x-requested-with': 'portal' },
     })
     expect(afterReplay.statusCode).toBe(401)
+    expect(afterReplay.json().error.code).toBe(ERROR_CODES.unauthorized)
+  })
+
+  /**
+   * The absent-credential row: no `portal_refresh` cookie at all, header present so
+   * this exercises the credential check rather than the CSRF guard.
+   *
+   * `assertUsableRefresh(undefined)` throws `InvalidTokenError`, which the route maps
+   * to 401 `UNAUTHORIZED` — a path nothing else in the suite reached, so a refactor
+   * that answered 400 `BAD_REQUEST` (or 500 on an undefined read) was unpinned.
+   */
+  it('refuses a refresh carrying no refresh cookie at all', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: { 'x-requested-with': 'portal' },
+    })
+
+    expect(response.statusCode).toBe(401)
+    expect(response.json().error.code).toBe(ERROR_CODES.unauthorized)
   })
 
   /**
@@ -547,6 +616,45 @@ describe('refresh and logout', () => {
 
     // Someone unable to log out is worse than a logout with nothing to do.
     expect(response.statusCode).toBe(204)
+    /**
+     * 204 must not carry a payload: `apps/web`'s client branches on the status and
+     * returns `undefined` for 204/205 without ever reading the body
+     * (apiClient.ts:130), so anything sent here would be discarded in silence.
+     *
+     * Honest scope of this assertion: it pins the *contract*, and it is not a
+     * mutation catcher. Measured — `reply.code(204).send({ ok: true })` on this very
+     * route still arrives as `statusCode 204`, `body ''`, no `content-type`: the
+     * framework strips a 204 payload before it reaches the wire, so nothing a handler
+     * can write here makes this line fail. It goes red only if the status changes,
+     * and the line above already covers that. Kept because a future transport (or a
+     * 200-with-empty-object regression) is exactly what it would catch.
+     */
+    expect(response.body).toBe('')
+  })
+
+  /**
+   * The extreme version of the case above, and the one logout's documented shape
+   * ("best-effort verification rather than `requireAuth`") actually describes: a
+   * request with no credential of any kind still answers 204.
+   *
+   * This pins surprising-but-intended behaviour. Swapping in `requireAuth` would be
+   * a perfectly reasonable-looking refactor, and it would silently strand the client
+   * in a half-logged-out state it cannot escape — the exact failure the comment in
+   * the route warns about. Nothing else in the suite sends logout a bare request.
+   */
+  it('answers 204 with no body when no cookie is sent at all', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/logout',
+      // The CSRF header is present on purpose: without it this would test the
+      // guard instead of the absent credential.
+      headers: { 'x-requested-with': 'portal' },
+    })
+
+    expect(response.statusCode).toBe(204)
+    // Same contract as the case above, restated for the bare request (its honest
+    // scope — framework-stripped payloads make this unfalsifiable — is recorded there).
+    expect(response.body).toBe('')
   })
 })
 

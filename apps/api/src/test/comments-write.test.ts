@@ -566,33 +566,83 @@ describe('write endpoints authentication — reverse tests', () => {
   /** The injected response type, spelled from `app.inject` rather than imported. */
   type Injected = Awaited<ReturnType<typeof app.inject>>
 
-  const targets: { name: string; run: (headers: Record<string, string>) => Promise<Injected> }[] = [
+  /**
+   * Both targets have to point at rows that really exist, and every refusal has to
+   * be bracketed by a check that nothing changed.
+   *
+   * The version this replaces posted to an article that was never there and deleted
+   * a `randomUUID()` that never was. Against absent rows, "the guard refused first"
+   * and "the write was attempted and fell over on its own" produce the same 401, so
+   * the two assertions below are the whole point of these rows — status and `code`
+   * alone would survive a refactor that moved `requireCsrfHeader` to after the
+   * insert. `articles-write.test.ts` had the identical hole and was fixed the same
+   * way; this file is the one that still had it.
+   */
+  let liveSlug = ''
+  let liveCommentId = ''
+
+  const commentCount = async (): Promise<number> => {
+    const { rows } = await app.db.query<{ n: string }>(
+      `select count(*)::text as n from comments where article_id = (select id from articles where slug = $1)`,
+      [liveSlug],
+    )
+    return Number(rows[0]!.n)
+  }
+
+  const commentStillThere = async (): Promise<boolean> => {
+    const { rows } = await app.db.query<{ id: string }>(
+      `select id from comments where id = $1`,
+      [liveCommentId],
+    )
+    return rows.length === 1
+  }
+
+  beforeAll(async () => {
+    liveSlug = await publishedArticle('authz-live')
+    liveCommentId = ((await postComment(liveSlug, { content: '一条真实的评论' }, writeHeaders(users.author))).json() as CommentNode).id
+  })
+
+  const targets: {
+    name: string
+    run: (headers: Record<string, string>) => Promise<Injected>
+    untouched: () => Promise<void>
+  }[] = [
     {
       name: 'POST comment',
-      run: (headers) => postComment('cw-unused', { content: 'x' }, headers),
+      run: (headers) => postComment(liveSlug, { content: 'x' }, headers),
+      // One row exists — the one this block created. A refused POST must not add a
+      // second, and the count is asserted rather than inferred from the status.
+      untouched: async () => {
+        expect(await commentCount()).toBe(1)
+      },
     },
     {
       name: 'DELETE comment',
-      run: (headers) => deleteComment(randomUUID(), headers),
+      run: (headers) => deleteComment(liveCommentId, headers),
+      untouched: async () => {
+        expect(await commentStillThere()).toBe(true)
+      },
     },
   ]
 
-  for (const { name, run } of targets) {
-    it(`${name} without any credentials is 401`, async () => {
+  for (const { name, run, untouched } of targets) {
+    it(`${name} without any credentials is 401 and writes nothing`, async () => {
       const response = await run({})
       expect(response.statusCode).toBe(401)
       expect(response.json().error.code).toBe(ERROR_CODES.unauthorized)
+      await untouched()
     })
   }
 
-  for (const { name, run } of targets) {
-    it(`${name} with credentials but no CSRF header is 403 CSRF_CHECK_FAILED`, async () => {
+  for (const { name, run, untouched } of targets) {
+    it(`${name} with credentials but no CSRF header is 403 CSRF_CHECK_FAILED and writes nothing`, async () => {
       // The header requirement is on DELETE exactly as on POST (design §5's named
       // trap), and it is the *last* line: these requests carry a valid token, so
       // reaching the header check at all is part of what is being proved.
       const response = await run({ authorization: `Bearer ${tokenFor(users.author)}` })
       expect(response.statusCode).toBe(403)
       expect(response.json().error.code).toBe(ERROR_CODES.csrfCheckFailed)
+      await untouched()
     })
   }
 
