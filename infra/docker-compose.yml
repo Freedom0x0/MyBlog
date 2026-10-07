@@ -22,7 +22,13 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
       POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in infra/.env}
     ports:
-      - '${POSTGRES_PORT:-5432}:5432'
+      # Loopback-published on purpose. A bare `5432:5432` binds 0.0.0.0, so the
+      # moment this file is used on a machine with a public interface the
+      # database is internet-reachable and the only thing between it and a
+      # scanner is one password. Nothing connects from off-box, so bind to
+      # 127.0.0.1 and make "not reachable" the default rather than a firewall
+      # rule someone has to remember.
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -38,7 +44,10 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - '${REDIS_PORT:-6379}:6379'
+      # Same reasoning as postgres, and more urgent: this Redis has no
+      # `requirepass`, so a 0.0.0.0 bind means anyone who can reach the port can
+      # read and write the token denylist without any credential at all.
+      - '127.0.0.1:${REDIS_PORT:-6379}:6379'
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
@@ -89,6 +98,12 @@ services:
       # our own app.
       MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-http://localhost:5175}
     ports:
+      # Deliberately NOT loopback-bound, unlike postgres/redis: the whole point
+      # of this service is that the browser PUTs to it directly and visitors'
+      # `<img>` tags GET from it, so it must be reachable from off-box. Its
+      # exposure is bounded by bucket policy (anonymous read only) and by writes
+      # requiring a signature — not by the bind address. The console (9001) has
+      # no such requirement; keep it off any host without a firewall rule.
       - '${MINIO_API_PORT:-9000}:9000'
       - '${MINIO_CONSOLE_PORT:-9001}:9001'
     volumes:
