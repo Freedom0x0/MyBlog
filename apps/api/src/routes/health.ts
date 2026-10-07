@@ -59,9 +59,18 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
 
     // 503 is what tells a load balancer to stop routing here. Returning 200 with
     // a failed body would keep traffic flowing to an instance that cannot serve.
+    // `satisfies` here is not decoration. `reply.send()`'s payload parameter is
+    // untyped in Fastify, so the `Promise<ReadinessPayload>` annotation on this
+    // arrow never reaches the object literal below — measured, not assumed: adding a
+    // required field to `ReadinessPayload` in `shared` leaves `tsc` completely clean
+    // without this line, while the same mutation against the `/health` literal above
+    // and against `ApiErrorEnvelope` in the error handler both fail to compile. This
+    // endpoint is the contract a load balancer reads, so drift here is exactly the
+    // kind that should stop a build rather than surface as a probe that silently
+    // never trips.
     return reply.code(allOk ? 200 : 503).send({
       status: allOk ? 'ok' : 'degraded',
       checks,
-    })
+    } satisfies ReadinessPayload)
   })
 }
