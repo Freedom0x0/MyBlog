@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/architecture.md", "reason": "S2 新增 plugins/auth、modules/auth、lib/tokens 等分层代码：依赖方向、app.ts 不 listen、fastify-plugin 封装逃逸、nodenext 的 .js 扩展名都是本阶段必须遵守的约束"}
+{"file": ".trellis/spec/backend/conventions.md", "reason": "§2 错误契约（5xx 同时擦除 code 与 message、只暴露本项目词汇）直接决定鉴权失败响应的写法；§5『any 掩盖真缺陷』与 §8 迁移规则（美元引号、禁改已应用迁移、不用用户可写字段做授权）适用于 refresh_tokens 迁移"}
+{"file": ".trellis/spec/guides/verification-checklist.md", "reason": "本阶段多处『对称验证』要求（CSRF 防护必须测反向、denylist 必须测立即生效），且 §『curl 不等于渲染』直接约束 G 阶段的验收方式"}
+{"file": ".trae/documents/technical_architecture.md", "reason": "D1 提权漏洞的原始证据（is_admin 读 user_metadata 的行号与攻击路径）与 S2 的修复归属记录"}

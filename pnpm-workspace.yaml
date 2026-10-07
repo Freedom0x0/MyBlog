@@ -1,0 +1,8 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+allowBuilds:
+  # esbuild ships a platform-specific binary and needs its postinstall to link it.
+  # Without this, vite cannot start. pnpm 12 blocks dependency build scripts by
+  # default and requires an explicit allowlist.
+  esbuild: true

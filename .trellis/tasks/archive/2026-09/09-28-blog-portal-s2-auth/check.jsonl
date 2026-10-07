@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/conventions.md", "reason": "核对鉴权实现是否遵守错误契约与授权纪律：后端不得出现 user_metadata、错误 code 不得转发框架/驱动码、迁移必须有可执行 down"}
+{"file": ".trellis/spec/guides/verification-checklist.md", "reason": "核对每条『已验证』是否有对应命令输出支撑，尤其 CSRF/轮换/denylist 三处是否做了反向与不变式断言而非只测成功路径"}
+{"file": ".trellis/tasks/09-28-blog-portal-s2-auth/design.md", "reason": "§4 校验与错误矩阵、§1 令牌模型、§7 CSRF 是本阶段逐端点核对的依据；§8 权衡记录用于检查是否发生了未经记录的偏离"}
+{"file": ".trae/documents/technical_architecture.md", "reason": "D1 关闭核对：确认管理员判定已完全脱离用户可自改字段，并有永久保留的回归测试"}

@@ -1,0 +1,119 @@
+# Local infrastructure only: Postgres, Redis and MinIO.
+#
+# The API and web app run on the host during development (pnpm dev) and connect
+# to these via localhost. Containerising the apps themselves is S8 work.
+#
+# Compose reads `infra/.env` automatically (same directory as this file).
+# Copy `infra/.env.example` to `infra/.env` before the first `up`.
+#
+# Object storage is NOT reachable from the app's test suite: nothing under
+# apps/api depends on it yet. It exists for SPIKE-E (see
+# .trellis/tasks/09-29-blog-portal-s3-write-path/implement.md) and, if the
+# spike's verdict holds, for the F upload path.
+
+name: myblog-infra
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in infra/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in infra/.env}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -U and -d are explicit: pg_isready defaults to the invoking OS user,
+      # which inside this image is not the POSTGRES_USER we created.
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # Object storage for blog media (design §4.3).
+  #
+  # IMAGE CHOICE: upstream MinIO no longer publishes free images — pulls of
+  # `minio/minio` (any tag, including previously released ones) come back
+  # `error from registry: denied`, and `quay.io/minio/minio` answers
+  # 401 to anonymous manifest requests. `cgr.dev/chainguard/minio` is
+  # Chainguard's rebuild of the same AGPL upstream source; the binary inside
+  # reports `minio version RELEASE.2026-09-22T19-25-18Z`, i.e. genuine
+  # upstream MinIO. It also ships `/usr/bin/mc`, which is what created the
+  # `portal-media` bucket and set its public-read policy — no S3 SDK was added
+  # to apps/api to do that. (Note `mc` can provision but could NOT sign a
+  # presigned PUT: `mc share upload` emits a POST form policy, not a PUT URL.
+  # See SPIKE-E.) `:latest` is the only tag Chainguard keeps pointed at the
+  # newest upstream release, so this service is deliberately not version-pinned
+  # the way postgres/redis are.
+  #
+  # CORS: `minio server --help` lists no CORS flag, but the config key
+  # `api.cors_allow_origin` (env form `MINIO_API_CORS_ALLOW_ORIGIN`) does
+  # exist in this build and is what governs browser preflight answers — see
+  # the SPIKE-E conclusion for the measured preflight response. It is a
+  # server-wide allowlist; per-bucket CORS is separately available via
+  # `mc cors set`.
+  #
+  # USER: this image defaults to uid 65532, and its `/data` is root-owned
+  # mode 0777. MinIO refuses to initialise a backend it cannot own
+  # (`FATAL Unable to initialize backend: file access denied`), so the
+  # container runs as root. Dev-only tradeoff: this bucket never holds
+  # anything but public blog images, and there is no host service hardening
+  # story here yet (S8).
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    user: '0:0'
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in infra/.env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in infra/.env}
+      # The browser origin that may PUT/GET against this bucket. Deliberately
+      # the single dev server origin, not `*`: design §4.3 wants public READ
+      # (which is bucket policy, not CORS) but credentialed WRITE only from
+      # our own app.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-http://localhost:5175}
+    ports:
+      - '${MINIO_API_PORT:-9000}:9000'
+      - '${MINIO_CONSOLE_PORT:-9001}:9001'
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      # No curl/wget/nc (and no grep/head) in this image, so the probe is a
+      # raw HTTP request over bash's /dev/tcp pseudo-device, matched with
+      # shell builtins only. `/minio/health/live` is unauthenticated, which
+      # keeps credentials out of the healthcheck.
+      # `$$hc_resp` is escaped for Compose: unescaped it would be interpolated
+      # away to an empty string and the check would never parse. The `read`
+      # target is written WITHOUT a dollar — it is a variable name, not a
+      # reference, and `$hc_resp` there would expand to nothing.
+      test:
+        [
+          'CMD',
+          'bash',
+          '-c',
+          'exec 3<>/dev/tcp/127.0.0.1/9000 && printf "GET /minio/health/live HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && read -r hc_resp <&3 && [[ $$hc_resp == *200* ]]',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
+  miniodata:

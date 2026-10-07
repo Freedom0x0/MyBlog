@@ -1,0 +1,2 @@
+{"file": ".trae/documents/technical_architecture.md", "reason": "验收核对表：逐个确认 D1-D11 的修复状态，每条都有可复核的 file:line 原始证据"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查分层纪律：service 层不得出现 req/reply 或 SQL，repository 层不得含业务规则"}

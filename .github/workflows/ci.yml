@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to the same branch makes the running build obsolete, so cancel it.
+# Without this, a force-push queues two full runs and only the last one matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    # Integration tests drive a real Fastify against a real Postgres, so CI needs
+    # the same database development has.
+    #
+    # No Redis service: the read paths never touch it, and the client no longer
+    # blocks startup when it is unreachable — so a dummy REDIS_URL satisfies
+    # config validation and nothing more. That is a direct consequence of the
+    # shutdown fix; before it, every integration test would have needed Redis up.
+    services:
+      # Needed from S2 on: the access-token denylist lives in Redis, and its
+      # tests assert a real TTL. Without this the comment above ("no Redis
+      # service required") would be stale rather than merely simplified.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    # Every key loadConfig marks required must exist here. S2 added JWT_SECRET and
+    # the two OAuth credentials; forgetting them turns "Migrate and seed" and every
+    # integration file's beforeAll into a ConfigError, while a local run stays green
+    # because apps/api/.env exists. CI has no .env, so required keys are a CI
+    # contract, not just a local one.
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      REDIS_URL: redis://localhost:6379
+      # 32+ chars because the schema enforces a minimum: a short dummy would fail
+      # the same boot check that protects production.
+      JWT_SECRET: ci-only-not-a-real-secret-0123456789abcdef
+      # Tests point OAUTH_BASE_URL at a local stub, so these never reach network.
+      OAUTH_CLIENT_ID: ci-stub-client-id
+      OAUTH_CLIENT_SECRET: ci-stub-client-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads the `packageManager` field in package.json, so the CI pnpm
+      # version cannot drift from the one developers use locally.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # Caches the pnpm store keyed on pnpm-lock.yaml.
+          cache: pnpm
+
+      - name: Install
+        # --frozen-lockfile fails if the lockfile and package.json disagree,
+        # so CI never silently resolves different versions than development.
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm -r lint
+
+      - name: Type check
+        run: pnpm -r check
+
+      # Schema first, then fixtures: the integration tests assert against the
+      # seeded content (page walks, byte-for-byte bodies, draft invisibility).
+      - name: Migrate and seed
+        run: |
+          pnpm --filter api migrate:up
+          pnpm --filter api seed
+
+      - name: Test
+        # --if-present because not every package has tests yet (apps/web has
+        # none until S4), and a missing script is not a failure.
+        run: pnpm -r --if-present test
+
+      - name: Build
+        # Production artifacts must build in CI, not only on a developer machine.
+        run: pnpm -r build
+
+      # Server-side secrets must never reach the browser bundle. A value only
+      # becomes dangerous if some module reads it as a VITE_/NEXT_PUBLIC_ variable,
+      # since those are inlined at build time — so scan the built web output for the
+      # names, which is what a mistake would look like.
+      - name: Scan web artifacts for server secrets
+        run: |
+          if grep -rIlE "JWT_SECRET|OAUTH_CLIENT_SECRET|SUPABASE_SERVICE_ROLE" apps/web/dist; then
+            echo "A server secret name was inlined into the browser bundle."
+            exit 1
+          fi
+          echo "No server secret references in apps/web/dist."
+
+      - name: Verify the API build output actually resolves
+        # `tsc` emitting successfully is not evidence that the output *runs*.
+        # With moduleResolution nodenext, an extension-less relative import
+        # type-checks and then throws ERR_MODULE_NOT_FOUND from dist/. Starting
+        # the artifact without config makes it fail on the env schema — which
+        # only happens after every import has been resolved, so reaching that
+        # error is the proof we want.
+        run: |
+          set +e
+          # env -u: DATABASE_URL/REDIS_URL are set job-level for the test DB, so
+          # this step must unset them — otherwise the server starts, listens and
+          # never exits, and the step hangs until the job times out.
+          env -u DATABASE_URL -u REDIS_URL node apps/api/dist/server.js > /tmp/api-start.log 2>&1
+          status=$?
+          cat /tmp/api-start.log
+          if [ "$status" -eq 0 ]; then
+            echo "Expected a non-zero exit without config, got 0"
+            exit 1
+          fi
+          grep -q 'DATABASE_URL' /tmp/api-start.log || {
+            echo "API did not reach config validation — an import probably failed to resolve"
+            exit 1
+          }

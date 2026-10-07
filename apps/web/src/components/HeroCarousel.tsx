@@ -1,0 +1,107 @@
+import React from 'react';
+import { Swiper, SwiperSlide } from 'swiper/react';
+import { Autoplay, Navigation, Pagination, EffectFade } from 'swiper/modules';
+import { useNavigate } from 'react-router-dom';
+import { motion } from 'framer-motion';
+import type { ArticleSummary } from 'shared';
+
+// Import Swiper styles
+import 'swiper/css';
+import 'swiper/css/navigation';
+import 'swiper/css/pagination';
+import 'swiper/css/effect-fade';
+
+const HeroCarousel: React.FC<{ articles: ArticleSummary[]; loading?: boolean }> = ({
+  articles,
+  loading = false,
+}) => {
+  const navigate = useNavigate();
+
+  if (!articles.length) {
+    /**
+     * `loading` must come from the parent: it passes an empty array both while the
+     * request is in flight *and* when the blog genuinely has no articles. Without
+     * the distinction an empty site advertised "loading" forever — a spinner that
+     * is really a lie about being busy. Found by walking the site with the demo
+     * articles cleared, which nothing else had ever rendered.
+     */
+    return (
+      <div className="w-full h-[60vh] md:h-[80vh] relative overflow-hidden flex items-end">
+        <div className="absolute inset-0 bg-gradient-to-br from-primary/20 via-background to-background" />
+        <div className="relative w-full max-w-5xl mx-auto px-4 pb-16">
+          {loading && (
+            <div className="inline-flex items-center rounded-full bg-primary/15 text-primary px-4 py-2 text-xs font-semibold">
+              Loading
+            </div>
+          )}
+          <div className="mt-6 text-4xl md:text-6xl font-black tracking-tight">Guoshaoran Blog</div>
+          <div className="mt-4 text-muted-foreground text-base md:text-lg max-w-2xl">
+            {loading ? '正在加载文章轮播内容...' : '这里还没有文章。'}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full h-[60vh] md:h-[80vh] relative overflow-hidden">
+      <Swiper
+        modules={[Autoplay, Navigation, Pagination, EffectFade]}
+        effect="fade"
+        speed={1000}
+        autoplay={{
+          delay: 5000,
+          disableOnInteraction: false,
+        }}
+        loop={true}
+        pagination={{ clickable: true }}
+        navigation={true}
+        className="w-full h-full"
+      >
+        {articles.map((article) => (
+          <SwiperSlide key={article.slug}>
+            <div
+              className="relative w-full h-full cursor-pointer"
+              onClick={() => navigate(`/blog/${article.slug}`)}
+            >
+              {article.coverImage ? (
+                <img
+                  src={article.coverImage}
+                  alt={article.title}
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+              ) : (
+                /**
+                 * Null in the contract, so no `<img src="">`: an empty src is the
+                 * broken-image slot, and this hero is full-bleed, so it would be the
+                 * first thing a visitor sees wrong.
+                 */
+                <div className="absolute inset-0 bg-gradient-to-br from-muted to-secondary" />
+              )}
+              <div className="absolute inset-0 bg-gradient-to-t from-background via-background/20 to-transparent" />
+              <div className="absolute inset-0 flex flex-col items-center justify-end pb-20 px-4 text-center">
+                <motion.div
+                  initial={{ opacity: 0, y: 30 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.8 }}
+                >
+                  <span className="inline-block px-3 py-1 mb-4 text-xs font-semibold tracking-wider text-primary-foreground uppercase bg-primary rounded-full">
+                    {article.category}
+                  </span>
+                  <h2 className="text-3xl md:text-5xl lg:text-6xl font-bold text-foreground mb-4 max-w-4xl leading-tight">
+                    {article.title}
+                  </h2>
+                  <p className="text-muted-foreground text-sm md:text-lg max-w-2xl mx-auto line-clamp-2">
+                    {article.excerpt}
+                  </p>
+                </motion.div>
+              </div>
+            </div>
+          </SwiperSlide>
+        ))}
+      </Swiper>
+    </div>
+  );
+};
+
+export default HeroCarousel;

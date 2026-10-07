@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "sourceMap": true
+  },
+  // Tests live next to the code they cover, so the build has to exclude them
+  // explicitly — otherwise they land in dist/ and ship to production.
+  "exclude": ["src/**/*.test.ts", "src/test/**"]
+}

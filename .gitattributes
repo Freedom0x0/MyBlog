@@ -1,0 +1,27 @@
+# Trellis: append-only developer journals should merge cleanly across
+# parallel sessions/worktrees — each session only appends a new block, so
+# there is nothing to actually conflict on.
+#
+# Do NOT add a rule for workspace/*/index.md here — it is fully regenerated
+# every session, so a real conflict there is expected and safe to resolve by
+# picking either side (task state lives in task.json, not index.md). See
+# .trellis/spec/cli/backend/directory-structure.md for details.
+.trellis/workspace/*/journal-*.md merge=union
+
+# Normalize all text files to LF in the repository and in the working tree.
+# Rationale: CI and the future Linux containers (S8) both run on Linux, and
+# shell scripts / Docker entrypoints break with CRLF. Overrides the system-level
+# core.autocrlf=true that Git for Windows sets by default.
+* text=auto eol=lf
+
+# Batch files are the exception: Windows requires CRLF for label and GOTO
+# parsing, so these must stay CRLF even though everything else is LF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary formats git should never try to normalize.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

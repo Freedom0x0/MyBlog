@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "验收时核对搬迁完整性：确认没有残留的旧路径引用、没有重复定义的环境变量、没有两套并存的构建脚本"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查分层纪律是否真的落地：service 层不得出现 req/reply 或 SQL，路由内不得手写错误响应体"}
+{"file": ".trae/documents/technical_architecture.md", "reason": "回归对照：确认搬迁后前端仍能构建、目录结构变化已记录，且未顺带改动任何业务逻辑（S0 不应触碰业务代码）"}
