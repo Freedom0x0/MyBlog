@@ -74,6 +74,123 @@ const EnvSchema = z.object({
    * cookies. Enumerating the accepted text makes a typo fail at boot instead.
    */
   COOKIE_SECURE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+
+  // ── Media object storage (S3 stage F, design §4.2/§4.3) ──────────────────────
+  //
+  // REQUIRED keys: MEDIA_ENDPOINT, MEDIA_BUCKET, MEDIA_ACCESS_KEY_ID,
+  // MEDIA_SECRET_ACCESS_KEY, MEDIA_PUBLIC_BASE_URL.
+  //
+  // The two credentials have no default by the same rule that keeps `JWT_SECRET`
+  // un-defaulted: a default secret is a credential committed to the repository, and
+  // a missing one must stop the process at boot rather than surface as a 500 on the
+  // first upload. The endpoint, bucket and public base are required too, even
+  // though "obviously" they are localhost:9000 and portal-media — because that
+  // reasoning is exactly how a production deploy that forgot the variable ends up
+  // dialling a host that does not exist, hours after boot, on a user-visible
+  // request. `DATABASE_URL` is required for the same reason; media is not a
+  // second-class dependency.
+  //
+  // CONSEQUENCE, and the reason this paragraph is here rather than in a README:
+  // every key marked required is a CI contract. `.github/workflows/ci.yml` sets
+  // them in its job-level `env:` block; add a required key without adding it there
+  // and every integration file's `beforeAll` dies with a `ConfigError` in CI while
+  // staying green on any machine that has an `apps/api/.env`.
+  MEDIA_ENDPOINT: z.url(),
+  MEDIA_BUCKET: z.string().min(1),
+  MEDIA_ACCESS_KEY_ID: z.string().min(1),
+  MEDIA_SECRET_ACCESS_KEY: z.string().min(1),
+
+  /**
+   * Where a browser reaches the same bucket publicly.
+   *
+   * Kept separate from `MEDIA_ENDPOINT` on purpose: they differ in production (the
+   * API signs against a private endpoint, visitors' `<img>` tags load through a CDN
+   * or reverse proxy), and `publicUrl` is built from *this* value only — so a
+   * mis-set endpoint can never leak an internal hostname into a page.
+   */
+  MEDIA_PUBLIC_BASE_URL: z.url(),
+
+  /**
+   * Not `auto-discovery`: SigV4 needs a region string even for MinIO, which ignores
+   * it as long as the same one is used for signing and for the bucket. `us-east-1`
+   * is MinIO's own default, so it is the value that cannot disagree with anything.
+   */
+  MEDIA_REGION: z.string().min(1).default('us-east-1'),
+
+  /**
+   * Hard cap on a stored object, measured by the server after the PUT.
+   *
+   * 5 MiB is a ceiling for blog cover images, not a target. This number is the one
+   * that actually binds: the `size` in an upload request cannot be enforced at
+   * signing time because `content-length-range` is a POST-policy condition that
+   * presigned PUTs do not have (SPIKE-E hard fact 1).
+   */
+  MEDIA_MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024),
+
+  /**
+   * How long a signed PUT stays valid. Bounded well below an hour on purpose: the
+   * signature grants a write to a bucket whose contents become public, so its
+   * lifetime is the window in which anyone holding the URL can replace the object.
+   * 60 s covers a cover image on a slow connection and nothing else.
+   */
+  MEDIA_PRESIGN_TTL_SECONDS: z.coerce.number().int().min(5).max(900).default(60),
+
+  /**
+   * S8-c: strip EXIF/GPS and XMP from an uploaded image before its URL is handed out.
+   *
+   * **DEFAULTED ON, and the default is the point** — this is a required-before-go-live
+   * privacy control, not a tuning knob, and a control that boots off is a control that
+   * stays off. It is not a required key either, by the S6 rule above: a required key is
+   * a CI contract, and CI must run the *on* path with no `.env` present.
+   *
+   * **Why a kill switch exists at all**, since disabling it re-opens the leak: the
+   * stripper refuses any file whose structure it cannot walk to the end, which is the
+   * right call for a bucket that is public but is also a new claim about every photograph
+   * anyone has ever taken. If that claim turns out to be wrong for some real camera's
+   * output — a segment shape this file has never seen — the operator needs to publish
+   * today's post without waiting for a code deploy and a rebuild, and `MEDIA_STRIP_METADATA=false`
+   * plus a restart is that path. It is a *stop-the-bleeding* switch, and the three things
+   * that keep it honest are in `uploads/service.ts` and `uploads/routes.ts`: it logs one
+   * `warn` per upload while off, it says so once at startup, and `strippedBytes` in every
+   * response stays `0` so a client can see the control is not running. There is no plan
+   * in which a production deployment wants this off permanently, and the boot line is
+   * written so that reading the log makes that visible.
+   */
+  MEDIA_STRIP_METADATA: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+
+  // ── S6: rate limiting on the write surface ─────────────────────────────────
+  //
+  // DEFAULTED, NOT REQUIRED — and that is a deliberate departure from the rule the
+  // block above states. A required key is a CI contract (`.github/workflows/ci.yml`
+  // has to list it or every integration `beforeAll` dies on a `ConfigError`), so
+  // growing the required set widens the surface that can silently break CI. A
+  // rate-limit ceiling is the opposite kind of setting: there is a number that is
+  // right in every deployment, and refusing to boot over a typo in it would take
+  // the blog down to protect it. Both stay overridable because the right number
+  // for a burst — a first-import of a real archive — is not knowable now.
+
+  /**
+   * Per authenticated identity, per minute, across every write route.
+   *
+   * 60 rather than the reflexive 30 because 30 refuses legitimate work this
+   * project actually does: an admin importing 12 cover images makes 24 upload
+   * requests (a presign and a verify each), and the integration and `test:e2e`
+   * suites issue their writes inside the same window. A ceiling that the project's
+   * own normal operations reach is a ceiling that gets raised under pressure at
+   * 2am, which is worse than one set correctly once. The population being limited
+   * is one admin plus commenters, so 60 is still two per second of nothing.
+   */
+  RATE_LIMIT_WRITE_PER_MINUTE: z.coerce.number().int().min(1).default(60),
+
+  /**
+   * Per client IP, per minute, for the anonymous login entry point.
+   *
+   * 10 is a real limit here rather than a courtesy: one person who wants to log in
+   * uses this endpoint once or twice. It exists because a crawler or a script can
+   * hit `/auth/github/start` with no credential at all, and each hit mints a state
+   * row plus a cookie — so the only free-to-reach write-ish door in the API.
+   */
+  RATE_LIMIT_ANON_PER_MINUTE: z.coerce.number().int().min(1).default(10),
 })
 
 export type Config = z.infer<typeof EnvSchema>

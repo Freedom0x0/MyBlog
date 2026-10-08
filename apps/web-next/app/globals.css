@@ -1,0 +1,32 @@
+@import "design-tokens/tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Line 1 is the load-bearing line, and it is deliberately the *first* statement.
+ *
+ * `packages/design-tokens` owns the `:root` / `.dark` HSL triples (design D-2), so
+ * this app cannot restyle them locally without the two sites drifting apart on the
+ * side nobody is looking at — dark mode, `--muted-foreground`. The reason for the
+ * position is the trap that ate a kilobyte in the SPA: with the `@import` *after* the
+ * `@tailwind` directives, a bundler is entitled to drop it, and Vite's did — with a
+ * warning, a green build, and a CSS file that was silently 1 kB smaller.
+ *
+ * Next's CSS pipeline is a different bundler and gets no assumption here: the token
+ * block's presence in the emitted `.next/static/css/*.css` is verified by grepping
+ * `--background` and `.dark`, not by trusting that `@import` resolves from
+ * `node_modules` the same way. See README ("design tokens").
+ *
+ * Everything below this point matches `apps/web/src/index.css` on purpose.
+ */
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}

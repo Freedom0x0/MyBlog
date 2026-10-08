@@ -1,5 +1,6 @@
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod'
 import { requireAuth, requireCsrfHeader } from '../../plugins/auth.js'
+import { requireWriteRateLimit } from '../../plugins/rateLimit.js'
 import { AuthRepository } from '../auth/repository.js'
 import { ArticleRepository } from '../articles/repository.js'
 import { ArticleService } from '../articles/service.js'
@@ -60,7 +61,7 @@ export const commentRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
     '/api/v1/articles/:slug/comments',
     {
-      onRequest: [requireAuth, requireCsrfHeader],
+      onRequest: [requireAuth, requireCsrfHeader, requireWriteRateLimit],
       schema: {
         params: SlugParamsSchema,
         body: CreateCommentSchema,
@@ -76,7 +77,7 @@ export const commentRoutes: FastifyPluginAsyncZod = async (app) => {
   app.delete(
     '/api/v1/comments/:id',
     {
-      onRequest: [requireAuth, requireCsrfHeader],
+      onRequest: [requireAuth, requireCsrfHeader, requireWriteRateLimit],
       schema: {
         params: CommentIdParamsSchema,
       },

@@ -12,9 +12,11 @@ import { authPlugin } from './plugins/auth.js'
 import { authRoutes } from './modules/auth/routes.js'
 import { errorHandlerPlugin } from './plugins/errorHandler.js'
 import { healthRoutes } from './routes/health.js'
+import { mediaPlugin } from './plugins/media.js'
 import { articleRoutes } from './modules/articles/routes.js'
 import { commentRoutes } from './modules/comments/routes.js'
 import { tagRoutes } from './modules/tags/routes.js'
+import { uploadRoutes } from './modules/uploads/routes.js'
 
 export interface BuildAppOptions {
   config: Config
@@ -62,6 +64,46 @@ export async function buildApp({
     // single id follow a request across services; otherwise we mint one.
     requestIdHeader: 'x-request-id',
     genReqId: () => randomUUID(),
+
+    /**
+     * Take the client address from `X-Forwarded-For`, but only from a peer that is
+     * already on loopback (S6-R4).
+     *
+     * Without this the API is wrong about who is calling. `server.ts:53` binds to
+     * `127.0.0.1`, so in the deployed shape the only TCP peer is the nginx gateway
+     * and `request.ip` is the proxy's address for *every* request — the whole site
+     * looks like one visitor. That is survivable for logging and fatal for the one
+     * limit that has no other key available: `GET /auth/github/start` is anonymous,
+     * so the client address is the only thing separating callers, and S6-R3's
+     * per-IP bucket without this setting is a single shared bucket that any one
+     * visitor can exhaust for everyone.
+     *
+     * `'loopback'` and not `true`. `true` trusts the header from *anyone who bothers
+     * to send it*, which turns a free header into the ability to choose your own
+     * rate-limit bucket — and to write an arbitrary value into whatever later reads
+     * `request.ip` for a security decision. `'loopback'` consults the header only
+     * when the socket peer is already 127.0.0.1/::1, so forging requires already
+     * being a process on this machine.
+     *
+     * Which address `request.ip` ends up being is worth stating exactly, because
+     * it decides whether nginx has to strip anything. Fastify reads it as
+     * `proxyAddr.all(req, trustFn)` and takes the **last** element
+     * (`fastify@5.12.5/lib/request.js:111-116`); `@fastify/forwarded` builds that
+     * list closest-hop-first (`[socket, xff-right-most, ..., xff-left-most]`) and
+     * `@fastify/proxy-addr`'s `all()` truncates at the first *untrusted* entry
+     * (`index.js:71-77`). With nginx's current
+     * `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`, the right-most
+     * entry is the one nginx appended from `$remote_addr`, and a real client
+     * address is not loopback — so the walk stops exactly there and `request.ip` is
+     * nginx's own value. A forged left-hand entry is unreachable by this path.
+     *
+     * So stripping is **not** required for the bucket to be honest, and `request.ips`
+     * — the full, still-forgeable array — is read by nothing in this app (verified:
+     * zero hits). What is genuinely forgeable is the local case above: a peer that
+     * is *already* loopback may name its own anonymous bucket, which is a
+     * can-already-read-the-box class of caller, not a remote one.
+     */
+    trustProxy: 'loopback',
   })
 
   // Zod is the single definition source for both validation and types, so a
@@ -117,6 +159,14 @@ export async function buildApp({
   // After redisPlugin: the denylist is stored in Redis.
   await app.register(denylistPlugin)
 
+  /**
+   * After the other infrastructure plugins and before the routes, like `db`: the
+   * upload routes read `app.media`. The bucket assurance runs here, at assembly, and
+   * never fails assembly — see `plugins/media.ts` for why an unreachable MinIO must
+   * not take the process (or the public reads) down with it.
+   */
+  await app.register(mediaPlugin, { config })
+
   // Before authPlugin: requireAuth reads the access token from a cookie, and
   // request.cookies only exists once @fastify/cookie has run.
   await app.register(cookie)
@@ -128,6 +178,7 @@ export async function buildApp({
   await app.register(articleRoutes)
   await app.register(commentRoutes)
   await app.register(tagRoutes)
+  await app.register(uploadRoutes)
   await app.register(authRoutes)
 
   return app

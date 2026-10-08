@@ -6,3 +6,11 @@ allowBuilds:
   # Without this, vite cannot start. pnpm 12 blocks dependency build scripts by
   # default and requires an explicit allowlist.
   esbuild: true
+  # unrs-resolver (pulled in by eslint-import-resolver-typescript, which
+  # eslint-config-next depends on) has a postinstall that selects a prebuilt
+  # platform binary. Denied on purpose: the package resolves the same binary
+  # through its optionalDependencies at require() time, so lint works without the
+  # script running — verified by `pnpm --filter web-next lint` passing. pnpm 12
+  # wrote a literal `set this to true or false` placeholder here when the new
+  # dependency appeared; this line replaces it so the file is valid config.
+  unrs-resolver: false

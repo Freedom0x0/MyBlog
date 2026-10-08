@@ -50,11 +50,20 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+      # Object storage for stage F's upload tests is NOT declared here as a service.
+      # It is started by the "Start MinIO" step instead, and the reason is measured,
+      # not stylistic — see that step. A `services:` entry cannot express what this
+      # image needs.
+
     # Every key loadConfig marks required must exist here. S2 added JWT_SECRET and
     # the two OAuth credentials; forgetting them turns "Migrate and seed" and every
     # integration file's beforeAll into a ConfigError, while a local run stays green
     # because apps/api/.env exists. CI has no .env, so required keys are a CI
     # contract, not just a local one.
+    #
+    # S3 stage F added the five MEDIA_* keys below — same trap, one notch worse: the
+    # upload suite's beforeAll reads them before it can even ask whether MinIO is up,
+    # so a missing one looks like an infrastructure outage rather than a config miss.
     env:
       DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
       REDIS_URL: redis://localhost:6379
@@ -64,6 +73,21 @@ jobs:
       # Tests point OAUTH_BASE_URL at a local stub, so these never reach network.
       OAUTH_CLIENT_ID: ci-stub-client-id
       OAUTH_CLIENT_SECRET: ci-stub-client-secret
+      # Must match the minio service's MINIO_ROOT_* values above, or every storage call
+      # answers SignatureDoesNotMatch — and because that is a 403, the message would be
+      # translated into a 5xx by s3-store.ts and look like a bucket outage.
+      MEDIA_ACCESS_KEY_ID: ci_media_user
+      MEDIA_SECRET_ACCESS_KEY: ci_media_password_not_a_real_secret
+      # 127.0.0.1 rather than localhost, twice over. First, the API signs against this
+      # host and a presigned signature covers the `host` header, so the URL the test PUTs
+      # to has to say exactly what was signed (SPIKE-E #8 measured that
+      # localhost-signed → 127.0.0.1-sent is a SignatureDoesNotMatch). Second, Docker
+      # publishes service ports on IPv4, so `localhost` in a runner resolves ::1 first.
+      # Both must agree or the anonymous public-URL read in the test would fail while the
+      # upload itself succeeded.
+      MEDIA_ENDPOINT: http://127.0.0.1:9000
+      MEDIA_BUCKET: portal-media
+      MEDIA_PUBLIC_BASE_URL: http://127.0.0.1:9000/portal-media
 
     steps:
       - uses: actions/checkout@v4
@@ -83,6 +107,20 @@ jobs:
         # so CI never silently resolves different versions than development.
         run: pnpm install --frozen-lockfile
 
+      # apps/web-next's Playwright suite (S4-e) deliberately does NOT install browsers
+      # here. All three tests assert on raw HTTP response bodies through Playwright's
+      # `request` fixture and never launch a page — measured, not assumed: the suite
+      # stays green with `PLAYWRIGHT_BROWSERS_PATH` pointed at an empty directory.
+      # A ~150 MB download plus apt shared libraries on every run, bought for a test
+      # that does not exist yet, is the kind of step this project does not add on
+      # speculaton.
+      #
+      # Trigger condition, so the next person does not have to rediscover it: the day a
+      # spec calls `page.goto`/`page.content()`, add
+      # `pnpm --filter web-next exec playwright install --with-deps chromium` back
+      # before the e2e step — `--with-deps` is required, because without the Ubuntu
+      # shared libraries the browser downloads happily and then cannot start.
+
       - name: Lint
         run: pnpm -r lint
 
@@ -96,14 +134,103 @@ jobs:
           pnpm --filter api migrate:up
           pnpm --filter api seed
 
+      # Object storage for stage F's tests, started as a step rather than a `services:`
+      # entry. Both reasons were measured on this machine against
+      # `cgr.dev/chainguard/minio:latest` (RELEASE.2026-09-22T19-25-18Z), and a service
+      # block cannot express either:
+      #
+      #   docker inspect → CMD=[] with ENTRYPOINT=[/usr/bin/minio]
+      #     A GH service runs the image's default command, and bare `minio` with no
+      #     arguments prints its help text and **exits 0**. Reproduced here: the
+      #     container sat at `Exited (0)` and the only thing in its log was the usage
+      #     banner. `services:` has no key for command or entrypoint, so `server /data`
+      #     cannot be passed at all.
+      #
+      #   docker inspect → USER=65532
+      #     The same non-root default that put `FATAL Unable to initialize backend:
+      #     file access denied` in local development — see the `user: '0:0'` line and its
+      #     comment in infra/docker-compose.yml. A service block has no `user:` key
+      #     either; `--user 0:0` on a plain `docker run` does the job.
+      #
+      # Control run on this machine, exactly as below and with the same credentials:
+      # health=200 after 2 polls, container `Up`. Upstream `minio/minio` is not an
+      # option (free image pulls return `denied` on every tag) and quay.io answers 401
+      # anonymously, so this image is the one local development uses too.
+      #
+      # No bucket-creation step, deliberately: `plugins/media.ts` does one HeadBucket
+      # and creates `portal-media` with its public-read policy when it is absent. That
+      # is why the assurance exists — a fresh dev box and CI need no manual `mc` step,
+      # while production, where infrastructure pre-creates the bucket, never runs that
+      # path. This container has no volume, so every CI run is a genuinely cold bucket
+      # and that create path is exercised rather than assumed.
+      - name: Start MinIO
+        run: |
+          docker run -d --name ci-media-minio \
+            --user 0:0 \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=ci_media_user \
+            -e MINIO_ROOT_PASSWORD=ci_media_password_not_a_real_secret \
+            cgr.dev/chainguard/minio:latest server /data
+          # The two values above must match MEDIA_ACCESS_KEY_ID / MEDIA_SECRET_ACCESS_KEY.
+          # Both are at least 8 characters because that is MinIO's own minimum; shorter
+          # and the server exits at startup, which would look like an infrastructure
+          # outage rather than a typo.
+
+      # Polling from the runner (which has curl, unlike the image: no curl/wget/nc,
+      # and not even grep/head/sed/awk/find) against the published port. Without this,
+      # `Test` can start while MinIO is still booting: the API boots anyway because the
+      # bucket assurance is deliberately non-fatal, and the upload suite would then fail
+      # its HeadBucket precondition instead of a real assertion.
+      #
+      # /minio/health/live is unauthenticated, so no credential goes into the probe.
+      - name: Wait for MinIO
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live > /dev/null; then
+              echo "MinIO is live after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO never answered on 127.0.0.1:9000" >&2
+          docker ps --all >&2 || true
+          exit 1
+
       - name: Test
         # --if-present because not every package has tests yet (apps/web has
         # none until S4), and a missing script is not a failure.
+        #
+        # This stays the unit/integration step on purpose. apps/web-next's Playwright
+        # suite is not picked up here because its script is `test:e2e`, not `test`:
+        # it needs `next build` output and two live processes, so running it alongside
+        # vitest would make every `pnpm -r test` depend on a build. It has its own step
+        # after Build, below. Renaming it to `test` would fold it into this line and
+        # slow every run — do not do that without meaning to.
         run: pnpm -r --if-present test
 
       - name: Build
         # Production artifacts must build in CI, not only on a developer machine.
         run: pnpm -r build
+
+      # After Build, twice over: this step starts `next start` (which serves `.next`)
+      # and `node dist/server.js` (which serves `apps/api/dist`), and
+      # `apps/web-next/playwright.config.ts` throws with instructions if either is
+      # missing rather than building it silently — a harness that rebuilt on its own
+      # would let a broken Build step look green.
+      #
+      # No `env:` block here. The step inherits the job-level variables, and that is
+      # how the API process is configured in CI: there is no `apps/api/.env` on a
+      # runner (it is git-ignored, and its local absence is what the `--env-file=.env`
+      # branch in that config exists for). Nothing in this workflow copies a credential
+      # into a tracked file; the job-level values are the CI stand-ins the API's own
+      # config validation accepts.
+      #
+      # The config starts the API on 127.0.0.1:3001 and `next start` on 127.0.0.1:3000.
+      # Neither collides with the services this job publishes (6379, 5432, 9000), and
+      # `reuseExistingServer: false` on the Next entry means a port already in use is a
+      # loud error rather than a test against somebody else's process.
+      - name: End-to-end (apps/web-next public pages)
+        run: pnpm --filter web-next test:e2e
 
       # Server-side secrets must never reach the browser bundle. A value only
       # becomes dangerous if some module reads it as a VITE_/NEXT_PUBLIC_ variable,

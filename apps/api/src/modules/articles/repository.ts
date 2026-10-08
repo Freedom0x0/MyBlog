@@ -89,6 +89,19 @@ const ADMIN_LIST_COLUMNS = `
   to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_key
 `
 
+/**
+ * Columns for the export: `DETAIL_COLUMNS` used verbatim, because an article's
+ * backup has to carry the body plus the whole front-matter set — which is exactly
+ * what the detail projection already is. A fourth column list here would be a fourth
+ * thing to keep in step with the table for no difference in content.
+ *
+ * Rows come back as `ArticleRecord`, the row type this repository already has. `id`
+ * and `updatedAt` travel along and are simply not rendered into the markdown; see
+ * `renderArticleMarkdown` in service.ts for why `updatedAt` in particular must not
+ * be.
+ */
+const EXPORT_COLUMNS = DETAIL_COLUMNS
+
 export interface ListParams {
   /** Ask for one more than the page size — see `listPublished`. */
   limit: number
@@ -313,6 +326,61 @@ export class ArticleRepository {
     )
 
     return result.rows.map(toAdminListRow)
+  }
+
+  /**
+   * Every article, in every status, whole: the export's single statement (S8-a).
+   *
+   * **No `where` clause, and that absence is the whole point.** The two list
+   * statements above either filter to `status = 'published'` or narrow to one
+   * status on request; a backup that reused either would silently omit the writing
+   * that has not been published yet, which is exactly the content a person would
+   * most hate to lose — it exists nowhere else, since the database became the only
+   * copy of the writing when the Supabase content was discarded. Drafts and archived
+   * rows are therefore included unconditionally rather than by a flag: an argument
+   * an operator could get wrong is a worse design than an argument that cannot be
+   * made.
+   *
+   * **No `limit`.** This reads the entire table by design; the ceiling and its cost
+   * are answered in `routes.ts` next to the response, not here.
+   *
+   * The `order by` is what makes two exports of an unchanged database produce the
+   * same sequence, and every part of it earns its place:
+   * - `published_at desc` puts the newest writing first, which reads correctly in a
+   *   downloaded file and in `jq`. Deliberately *not* the admin list's
+   *   `updated_at`: that key moves every time the editor saves, so an export taken
+   *   after a no-op edit would shuffle the whole file. Sorting on a key that only
+   *   changes when the writing changes is what keeps a diff of two backups readable.
+   * - `nulls last` because Postgres defaults `desc` to *nulls first*, which would
+   *     park every never-published article at the top of the backup. Determinism
+   *     would survive either way (the `slug` tie-break below settles the NULL group),
+   *     so this half is about legibility and about matching the convention the public
+   *     list and `articles_list_keyset` already use.
+   * - `slug` as the tie-breaker, and it is a *total* order: `slug` is
+   *   `not null unique`, so no two rows can tie on it and no row's position can ever
+   *     depend on disk layout or on a page boundary. A uuid tie-breaker would also be
+   *     deterministic, but a random one makes the file's order meaningless to a human
+   *     reading a diff. Renaming a slug moves that entry in the backup — correct,
+   *     because a rename is an edit and should show up.
+   *
+   * No index serves this order, stated rather than discovered later (conventions §9
+   * forbids claiming one without proving it): `articles_list_keyset` is
+   * `(status, published_at desc nulls last, id desc)`, and with `status` unconstrained
+   * the leading column cannot be matched, so the planner will do a seq scan plus a
+   * sort. At blog scale that is the cheapest correct answer — the whole table is read
+   * into memory by this request anyway — and the condition that reopens it is the same
+   * one the admin list records: a visibly slow response at a few thousand rows, at
+   * which point `create index articles_export_order on articles (published_at desc
+   * nulls last, slug)` is the candidate to prove with `EXPLAIN`, not to assume.
+   */
+  async listAllForExport(): Promise<ArticleRecord[]> {
+    const result = await this.pool.query<ArticleRecordRow>(
+      `select ${EXPORT_COLUMNS}
+         from articles
+        order by published_at desc nulls last, slug`,
+    )
+
+    return result.rows.map(toArticleRecord)
   }
 
   /**

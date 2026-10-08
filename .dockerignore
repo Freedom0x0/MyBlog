@@ -1,0 +1,41 @@
+# Build context hygiene for the two app images.
+#
+# The critical line is node_modules: pnpm's store is absolute-path symlinks into the
+# host's store directory, so a copied node_modules is broken inside the image and the
+# build fails with a resolution error that reads like a dependency bug. Every image
+# installs from the lockfile instead.
+node_modules
+**/node_modules
+
+# Build outputs are rebuilt inside the image. Copying the host's would also defeat
+# the purpose of the `NEXT_OUTPUT=standalone` build, which produces a different
+# artifact shape than a local `next build`.
+.next
+**/.next
+dist
+**/dist
+*.tsbuildinfo
+apps/web-next/next-env.d.ts
+
+# Never let a secret into a layer. `.env` files are gitignored and are the *only*
+# place the real values live, and a COPY of one would be readable by anyone who can
+# pull the image — image layers are not a secret store, which is why the runtime
+# takes configuration through the environment instead.
+.env
+**/.env
+**/.env.local
+**/.env.*.local
+
+# Local dev and repo noise, all irrelevant to a build and each one a cache-buster for
+# the COPY layers that follow it.
+.git
+.github
+.trellis
+.trae
+.qoder-tmp
+**/.next/cache
+infra/pgdata-backups
+coverage
+*.log
+*.md
+!packages/**/*.md

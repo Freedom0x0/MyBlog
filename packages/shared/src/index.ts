@@ -297,6 +297,125 @@ export interface ImportArticlesResponse {
   results: ImportArticleResult[]
 }
 
+/**
+ * ── Markdown export (`GET /api/v1/admin/articles/export`) ──────────────────────
+ *
+ * The way out, paired with the import above.
+ *
+ * One entry of the export is `ImportArticleFile` **by reference, not by copy** —
+ * which is the design requirement written where a compiler can enforce it. The
+ * export document's `articles` array is literally the type of the import body's
+ * `files` array, so the file this endpoint produces goes into
+ * `POST /api/v1/articles/import` with no translation, and any future change to the
+ * import's per-file shape lands on the export at the same moment. A backup format
+ * that needs a converter to feed your own writer is how a project ends up with a
+ * manual restore script, and a restore script is not a backup.
+ *
+ * What travels is therefore *rendered markdown with front-matter* rather than
+ * structured fields: the import parses server-side and writes through the one
+ * create path (design §3), so structured fields here would need re-rendering into
+ * markdown on the way back in — a second parser, which is exactly what S3-R8
+ * refuses.
+ *
+ * Scope, stated because a backup that silently omits half the data is worse than no
+ * backup: this is the **writing** only. Comments, users and the media objects the
+ * bodies and `coverImage` URLs point at are not in here, and no import endpoint can
+ * take them back (see the export route's own comment and the S8 notes).
+ */
+export type ExportedArticleFile = ImportArticleFile
+
+/**
+ * The whole blog as one JSON document.
+ *
+ * `version` is a literal rather than an open `number` so a future format change is
+ * a type error at every reader instead of a silent reinterpretation — and because
+ * the reader that matters (a restore run) has to be able to refuse a document it
+ * does not understand rather than half-import it.
+ *
+ * `exportedAt` is the server's clock at the moment of generation. It is the one
+ * field that makes two exports of an unchanged database differ as *documents*; the
+ * `articles` sequence beneath it is ordered deterministically so the part anyone
+ * would diff stays stable (see the route's comment).
+ *
+ * `articles` carries every article in every status, including drafts, ordered by
+ * `published_at desc nulls last, slug`. Not reusing the admin list's order is
+ * deliberate: that one sorts by "last changed" for a screen, while this one needs a
+ * sort that only changes when the writing changes, so a restore and a re-export
+ * produce a readable diff instead of 300 reordered entries.
+ */
+export interface ExportedBlog {
+  version: 1
+  exportedAt: string
+  articles: ExportedArticleFile[]
+}
+
+/**
+ * ── Uploads (S3 stage F, design §4.2) ───────────────────────────────────────
+ *
+ * Four shapes for two calls, because a browser cannot be trusted with either the
+ * size or the type of what it is about to PUT (SPIKE-E, hard fact 2). The API
+ * therefore issues a *capability* first and a *verdict* second, and only the
+ * verdict contains a URL fit to be stored on an article.
+ */
+
+/**
+ * Body of `POST /api/v1/uploads`: the client's *declaration* of what it intends to
+ * upload. Both fields are advisory and neither is signed, so neither is a check —
+ * `size` exists so an obviously-over-large file is refused before a signature is
+ * wasted, and `contentType` exists only to choose the key's extension. What
+ * actually landed is decided later by `HeadObject` and a magic-byte sniff.
+ */
+export interface RequestUploadInput {
+  contentType: string
+  size: number
+}
+
+/**
+ * Response of `POST /api/v1/uploads`.
+ *
+ * Deliberately **no** public URL here: nothing has been uploaded yet, and handing
+ * back `base/key` at signing time would advertise a location for an object that
+ * may never arrive or may arrive as something else. `expiresAt` is the signature's
+ * own deadline, not a guess — the client needs it to decide to re-sign rather than
+ * to retry a PUT that MinIO will answer with `Request has expired`.
+ */
+export interface PresignedUpload {
+  key: string
+  uploadUrl: string
+  expiresAt: string
+}
+
+/** Body of `POST /api/v1/uploads/complete`. */
+export interface CompleteUploadInput {
+  key: string
+}
+
+/**
+ * Response of `POST /api/v1/uploads/complete` — the only upload response whose
+ * `publicUrl` is safe to write into `articles.cover_image`.
+ *
+ * `contentType` is the type *measured from the bytes*, not the type the client
+ * declared, and `sizeBytes` is likewise the server's number — of the object as it now
+ * stands in the bucket, which since S8-c may be smaller than what was uploaded. A
+ * caller that wants to display dimensions or reject a file by real weight has those
+ * here rather than having to trust its own `File` object.
+ */
+export interface CompletedUpload {
+  publicUrl: string
+  contentType: string
+  sizeBytes: number
+  /**
+   * Bytes of metadata container the server cut out of the object before publishing it
+   * (S8-c: EXIF/GPS and XMP, removed losslessly — the picture data is byte-identical).
+   *
+   * Optional for the same reason every addition to a response is optional: the admin UI
+   * was written against three fields and is not this stage's file to edit. Present and
+   * `0` means the strip ran and found nothing to take; absent means an API build that
+   * never looked. `sizeBytes` is always the size that is actually being served.
+   */
+  strippedBytes?: number
+}
+
 export interface CommentAuthor {
   /**
    * The author's user id.

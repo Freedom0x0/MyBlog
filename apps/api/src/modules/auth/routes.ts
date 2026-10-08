@@ -4,6 +4,7 @@ import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { ApiError } from '../../errors.js'
 import { requireAuth, requireCsrfHeader } from '../../plugins/auth.js'
+import { requireAnonRateLimit } from '../../plugins/rateLimit.js'
 import { AuthRepository } from './repository.js'
 import { TokenStore } from './token-store.js'
 import {
@@ -76,9 +77,23 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
   }
 
   // ── login ──────────────────────────────────────────────────────────────────
+  /**
+   * The only rate limit that can be keyed on IP in this whole stage, and the only
+   * one that needs to be (S6-R3): this route answers with no credential at all, so
+   * `request.auth` does not exist yet and there is no identity to bucket by — the
+   * client address is the only thing separating one caller from the next. It also
+   * mints a state row per call, which is the resource worth protecting.
+   *
+   * `request.ip` is only a *client* address because `app.ts` sets
+   * `trustProxy: 'loopback'`; without that setting every one of these buckets is
+   * the proxy's address and the limit is a global one.
+   */
   app.get(
     '/api/v1/auth/github/start',
-    { schema: { querystring: StartQuerySchema } },
+    {
+      onRequest: [requireAnonRateLimit],
+      schema: { querystring: StartQuerySchema },
+    },
     async (request, reply) => {
       /**
        * The nonce is a second secret handed only to this browser. state proves the
@@ -183,6 +198,18 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
   )
 
   // ── session lifecycle ──────────────────────────────────────────────────────
+  /**
+   * Neither of these two carries a rate limit, deliberately, and the reason is
+   * longer than the code so it lives in `plugins/rateLimit.ts` next to the guards
+   * that were not attached here. Short version: an IP bucket in the deployed
+   * topology — where every caller presents the gateway's address — would let one
+   * visitor hammering `/refresh` lock every other visitor out of renewing, and
+   * `/logout` is the recovery action a locked-out user reaches for. Both already
+   * run `requireCsrfHeader`, and both are credential-shaped in ways that leave
+   * nothing for a blind flood to guess at. Identity bucketing is not available
+   * either: `logout` verifies best-effort on purpose, so `request.auth` is
+   * deliberately absent for these routes.
+   */
   app.post(
     '/api/v1/auth/refresh',
     { onRequest: [requireCsrfHeader] },

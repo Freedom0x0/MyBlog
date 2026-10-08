@@ -5,6 +5,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import { useAuthStore } from '../store/authStore';
 import { createArticle, getAdminArticle, updateArticle } from '../utils/articlesApi';
 import { ApiError, describeApiError } from '../lib/apiClient';
+import CoverImageUpload from '../components/CoverImageUpload';
 import type { ArticleAdmin } from 'shared';
 
 /**
@@ -421,8 +422,11 @@ export default function AdminArticleEditor() {
                     onChange={e => setCoverImage(e.target.value)}
                     className="w-full bg-background border border-border rounded-md px-3 py-2"
                   />
-                  {/* Still a URL the admin types. Uploading is stage F, and it does
-                      not change this field: the column stores a URL either way. */}
+                  {/* Manual entry stays on purpose: the column stores a URL whether it
+                      was typed or uploaded, and an article whose cover was set before
+                      uploads existed still has to be editable. The button below is what
+                      makes the "already lives somewhere else" requirement go away. */}
+                  <CoverImageUpload onUploaded={setCoverImage} />
                 </div>
                 <div>
                   <div className="text-sm font-medium mb-2">阅读时长（分钟）</div>
