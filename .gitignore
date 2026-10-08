@@ -57,3 +57,6 @@ apps/api/undefined/
 # Scratch directory CLI tooling writes response snapshots into while diagnosing.
 # Not a build artifact and not project output; kept out of history on purpose.
 .qoder-tmp/
+
+# pg_dump archives (verified but still database contents) never belong in git.
+infra/backup/pgdata-backups/

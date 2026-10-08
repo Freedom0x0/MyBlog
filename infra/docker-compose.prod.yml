@@ -1,0 +1,112 @@
+# Production app stack — the three processes that make the site, on a single box.
+#
+# Deliberately separate from `docker-compose.yml`, which is the dev stack
+# (postgres/redis/minio) and stays there: those containers hold state and their data
+# lives in named volumes. This file holds none of it.
+#
+# ─── Why `network_mode: host` instead of a bridge network ───────────────────────────
+#
+# Both app processes listen on loopback **by design, in code**: `apps/api` hardcodes
+# `host: '127.0.0.1'` in src/server.ts:53 and the Next runtime sets HOSTNAME=127.0.0.1.
+# That default is the thing keeping the API and the site off the public interface of the
+# Aliyun host, and the gateway config in nginx/myblog.conf writes its upstreams as
+# 127.0.0.1:3000 / 127.0.0.1:3001 for the same reason.
+#
+# On a bridge network those loopback binds make each container unreachable to everyone
+# but itself, so the "obvious" fix would be to bind 0.0.0.0 inside the container. That is
+# a security-relevant change to a default this project chose on purpose, and it would
+# also mean the dev loopback guarantee and the prod guarantee are different rules — the
+# kind of split that gets someone a public Postgres later.
+#
+# Host networking keeps one invariant instead of two: **only nginx listens beyond
+# loopback**, and it is the only thing with a published port.
+#
+# What that costs, stated so nobody has to rediscover it: no network isolation between
+# these containers, no per-container bandwidth control, and containers share the host's
+# port space (so a process already on the box could answer 3000/3001). The trigger to
+# revisit: when this stops being one VM, or when a second tenant lands on the host. Then
+# the change is a `HOST` env in apps/api + bridge upstreams, not a redesign.
+#
+# ─── Configuration ──────────────────────────────────────────────────────────────────
+#
+# Nothing here holds a secret. Both apps read the same env files the host-process route
+# reads (`apps/api/.env`, and `NEXT_PUBLIC_*` baked into the web build), because
+# `pnpm build` is where Vite inlines `VITE_API_BASE_URL` and Next inlines
+# `NEXT_PUBLIC_SITE_URL` — so the build happens **on the box**, from a git checkout, not
+# in a registry. That is a deliberate consequence of the deployment ruling: pulling a
+# pre-built image would bake the wrong origin into the artifact.
+#
+# Usage (from the repo root on the server):
+#   docker compose -f infra/docker-compose.prod.yml config      # check it parses
+#   docker compose -f infra/docker-compose.prod.yml up -d --build
+#   infra/RUNBOOK.md has the first-time and rollback sequences.
+
+name: myblog-app
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: myblog-api:local
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      # The same file the host-process route uses; gitignored, never baked into an image.
+      - ../apps/api/.env
+    healthcheck:
+      # /health is liveness and checks nothing, which is exactly what a container health
+      # probe wants: it must not fail because Postgres hiccuped, or the orchestrator
+      # restarts a healthy process during an outage it cannot fix.
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web-next/Dockerfile
+    image: myblog-web:local
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      # `required: false` because this app has no secret: its only variable is
+      # API_INTERNAL_URL, whose default matches the loopback port the API binds. A
+      # missing file here is a normal state on a fresh box, not a misconfiguration —
+      # `docker compose config` fails the whole file otherwise, which is how this was
+      # found. Copy apps/web-next/.env.example to create it when you do need to point
+      # the server somewhere else.
+      - required: false
+        path: ../apps/web-next/.env
+    depends_on:
+      api:
+        # Wait for the API to answer, not merely to exist. The homepage is prerendered
+        # during `next start`'s first request path here, and D-3's degraded state is
+        # correct-but-ugly: a cold start that races the API can serve "interface
+        # unreachable" until the next revalidation window.
+        condition: service_healthy
+
+  gateway:
+    image: nginx:1.27-alpine
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./nginx/myblog.conf:/etc/nginx/conf.d/default.conf:ro
+      # The admin SPA is a static Vite build, not a server: nginx serves it directly.
+      # Built on the box by the runbook's step 2 (`pnpm --filter web build`), because
+      # VITE_API_BASE_URL=/api/v1 is baked into the artifact at build time.
+      - ../apps/web/dist:/srv/myblog/apps/web/dist:ro
+      - /var/log/nginx:/var/log/nginx
+    depends_on:
+      - api
+      - web
+    healthcheck:
+      # `nginx:alpine` has no curl and busybox wget is the standard substitute; asking a
+      # local upstream through the gateway proves routing, not just that nginx is up.
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1/health']
+      interval: 20s
+      timeout: 4s
+      retries: 5
+      start_period: 10s

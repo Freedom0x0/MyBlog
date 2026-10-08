@@ -306,7 +306,12 @@ $$;
 
 ## 8. 后端选型：为什么留在 Supabase
 
-**结论：留在 Supabase，不自建后端。**
+> **本节的结论已被 S1–S3 推翻（2026-10-08 校正）。** 现在**没有 Supabase**：数据在自建
+> Postgres（`apps/api/migrations/`），鉴权是自建 GitHub OAuth + 双令牌 + Redis 拒绝名单，
+> 对象存储在自建 MinIO。下面的表与结论**原样保留**——它是当时的真实判断，也错得有价值（见本节末）。
+> **当前架构看 §9 与 `infra/RUNBOOK.md`；不要按本节做部署决策。**
+
+**当时的结论：留在 Supabase，不自建后端。**
 
 | 维度 | Supabase | 自建后端 |
 |---|---|---|
@@ -318,6 +323,17 @@ $$;
 | 供应商锁定 | `auth.jwt()`、RLS 语法 | 无 |
 
 自建后端对个人博客**没有收益**：博客的瓶颈是内容产出，不是后端能力。唯一值得自建的理由是"练后端"本身即目标——那属于另一个项目，不该寄生在博客上。
+
+### 这个结论为什么没成立
+
+表里每一行单独看都成立，错的是一句**隐含前提**：把"个人博客"当成"后端能力与本项目无关"。在这个项目里后端能力恰恰是目标之一，所以"练后端属于另一个项目，不该寄生在博客上"不是判断错，是**答错了问题**——它按"最小成本发布博客"解题，而项目要的是"边发布边学会自建"。
+
+事后看还有两处估偏了：
+
+- **"约 1–2 天"**：OAuth 授权码流 + refresh 轮换 + 复用检测 + 拒绝名单实际占满整个 S2。第一次真登录暴露的缺陷（回调 302 落在 API 端口上，用户被丢在 404 页）不在任何估算里，因为它是只有真实流量才能暴露的那类问题。
+- **"运维零"**：换来的是一份更长的运维清单（`infra/RUNBOOK.md`）。省下的只有"免费项目被暂停"这一类风险。
+
+保留下面两条风险条目，它们对"要不要用托管服务"这个问题依然有效，只是不再决定本项目的形状。
 
 ### 必须知晓的两个风险
 
@@ -333,20 +349,47 @@ $$;
 
 ## 9. 部署与运维
 
-**平台**：Vercel。`vercel.json` 只有一条 SPA rewrite（所有路径回落到 `index.html`）。
+> 2026-10-08 重写。本节原来的内容（Vercel + `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` +
+> `supabase/migrations/` 手动 apply）已整体失效：那两个变量在 `apps/` 与 `packages/` 里
+> **grep 0 命中**，`supabase/migrations/` 已标停用（见该目录 README）。
+> **操作手册在 `infra/RUNBOOK.md`**，本节只写形状与为什么。
 
-**环境变量**（`.env.example`，仅两个）：
+**进程形状**：三个进程 + 一个反代，全部在同一台机器上，**只有 nginx 监听公网**。
 
-```
-VITE_SUPABASE_URL=
-VITE_SUPABASE_ANON_KEY=
-```
+| 进程 | 端口 | 谁起它 |
+|---|---|---|
+| `apps/api`（Fastify） | `127.0.0.1:3001` | systemd 或 `infra/docker-compose.prod.yml`。绑定地址写在 `src/server.ts:53` 里，**读不到环境变量** |
+| `apps/web-next`（公开页 SSR） | `127.0.0.1:3000` | 同上（standalone 输出，`HOSTNAME=127.0.0.1` 必须显式给，其默认是 `0.0.0.0`） |
+| `apps/web`（管理后台） | 无（静态文件） | nginx 直接托管 `apps/web/dist` |
+| `nginx` | `:80`（将来 `:443`） | 系统服务。路由表在 `infra/nginx/myblog.conf` |
+| postgres / redis / minio | 各自的**回环**映射 | `infra/docker-compose.yml` |
 
-> `VITE_` 前缀意味着**这两个值会被打进前端产物**，这是设计如此——anon key 本就是公开的，安全性依赖 RLS。**绝不能**把 `service_role` key 放进任何 `VITE_` 变量。
+**"只绑回环"是一条贯穿性不变量**，不是本地开发方便：公网唯一入口是 nginx。这也是
+prod compose 用 `network_mode: host` 的原因——bridge 网络下那些回环绑定会让容器互相够不着，
+而"解决办法"如果是改成 `0.0.0.0`，就把这条不变量换掉了。
 
-**本地开发**：`npm run dev` → `scripts/kill-port.mjs` 先释放 5175 端口，再 `vite --port 5175 --strictPort`。
+**环境变量分两类，界限是"能不能出现在浏览器产物里"**：
 
-**数据库变更流程**：`supabase/migrations/` 下按序号追加 SQL，手动 apply。**没有自动化迁移工具链**，也没有回滚脚本。规模小的时候够用，但 §7 第 5 条（坏的 04 已被 05 覆盖）说明这个流程已经出过一次错。
+- 运行期（`apps/api/.env`，gitignored）：`DATABASE_URL`、`REDIS_URL`、`JWT_SECRET`、
+  `OAUTH_*`、`API_PUBLIC_URL`、`PORTAL_WEB_ORIGIN`、`COOKIE_SECURE`、`MEDIA_*`（其中
+  `MEDIA_ACCESS_KEY_ID` / `MEDIA_SECRET_ACCESS_KEY` 等 5 个是必填，**必填即 CI 契约**）。
+  `dist/server.js` 不自己读 `.env`，所以 systemd 用 `--env-file=.env` 或环境注入。
+- **构建期**（编译进产物，改了必须重新构建）：`VITE_API_BASE_URL=/api/v1`（Vite 侧）、
+  `NEXT_PUBLIC_SITE_URL`（Next 侧，只用于 OG/canonical 的绝对地址）。
+  带这两个前缀的变量**永远是公开的**，所以本项目的任何 secret 都不许用这两个前缀——
+  CI 里有一步专门 grep `apps/web/dist` 来证明这件事没被违反。
+
+**数据库变更流程**：`apps/api/migrations/NNNN_名称.{up,down}.sql`，`pnpm --filter api migrate:up`
+按 `schema_migrations` 表记账后只跑新的那几张；`migrate:down all` 存在但**不是**发布回滚手段。
+0001/0002/0003 都写了 down 文件（drop 表、加回 `users_github_login_key`），0003 的 down
+在两个账号共用同一 login 时会**主动失败**而不是删行凑约束——这是设计而不是缺陷。
+CI 每次跑的是**空库 + 全序列**，所以"我本地是改出来的"这条路在 CI 里一定会暴露。
+
+**仓库根那个 `vercel.json` 是历史遗留**：它只服务过 Supabase 时代的纯 SPA
+（`buildCommand: pnpm --filter web build` + 全量 rewrite 到 `index.html`）。今天照它部署会
+**只发出管理后台、丢掉 SSR 的公开页**。留着是因为删它不属于任何阶段的任务，
+但它不是可用配置——真要接 Vercel 得先决定公开页与 API 怎么跨域（见 §8 的推翻说明与
+`infra/RUNBOOK.md` 的缺口清单）。
 
 ---
 
@@ -354,11 +397,23 @@ VITE_SUPABASE_ANON_KEY=
 
 ### 10.1 三条路线
 
+> 2026-10-08 校正：实际走的是 **B + C**——公开页搬进 Next.js App Router（B 的形态），
+> 但数据库不是 Supabase 而是自建 Postgres（C）。星标因此挪到下面这行，原表保留作历史。
+>
+> **已选定的形状：`B 的公开页 + C 的后端 + 自建对象存储`**。
+> 值得记住的是 C 被排除的那条理由——"练后端属于另一个项目，不该寄生在博客上"——
+> 正是本项目**否决掉**的判断：学习目标不是寄生，是主要产出之一（S0–S8 的排布本身就是证据）。
+> 而 B 的"数据库不动"这半边没走通：`*.supabase.co` 在国内不稳定 + 免费项目会被暂停，
+> 两条 §8 早就写下的风险合起来足以推翻"零运维"这一栏。
+
 | 路线 | 做法 | 收益 | 代价 |
 |---|---|---|---|
-| **A. 现状加料** | 保持 Vite SPA + Supabase | 1–2 天可发布 | SEO 上限锁死，分享无预览卡 |
+| **A. 现状加料** | 保持 Vite SPA + Supabase | 1–2 天可发布 | SEO 上限锁死，分享无预览卡。**已被实测坐实**：公开文章 URL 的响应是 841 字节空壳，正文关键词命中 0 |
 | **B. 迁 Next.js + Supabase** ⭐ | 4 个页面搬到 App Router，数据库不动 | SSR/SSG、OG、RSS、sitemap；Supabase 完全兼容 | 重写路由层（页面少，不难） |
 | **C. 自研后端** | Node/Go + Postgres 替换 Supabase | 练后端 | 见 §8，对博客无收益 |
+
+**A 栏那句"SEO 上限锁死"当初被当成不可测量而搁置，S4 给了它一个数字（841 字节 vs 20302 字节）。**
+选型阶段能测的东西，不要留着辩论。
 
 ### 10.2 建议
 

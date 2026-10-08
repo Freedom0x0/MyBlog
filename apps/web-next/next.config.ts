@@ -46,13 +46,25 @@ const config: NextConfig = {
     ]
   },
 
-  // `output: 'standalone'` is deliberately NOT set here, and the reason is measured:
-  // with it on, `next start` prints `"next start" does not work with
-  // "output: standalone" configuration.` and points at
-  // `.next/standalone/server.js` — whose default bind is `0.0.0.0`, not the loopback
-  // this stage requires. Standalone output is the container image's business (design
-  // D-1's nginx topology, S5/S8); adding it now would make the app's own `start` script
-  // a warning.
+  // `output: 'standalone'` is NOT on by default, and the reason is measured: with it
+  // on, `next start` prints `"next start" does not work with "output: standalone"
+  // configuration.` and points at `.next/standalone/server.js`. So it is gated on an
+  // env var that only the container image sets (`apps/web-next/Dockerfile` runs
+  // `node server.js`, never `next start`).
+  //
+  // Why gated rather than simply set: the dev loop, `pnpm -r build` and the Playwright
+  // suite all go through `next start`, and an unconditional `standalone` would break
+  // three of them to serve one. Why the container needs it at all: without standalone,
+  // the runtime image has to copy Next's whole dev-time `node_modules` closure, which
+  // is the difference between a ~200 MB image and an image that carries its own
+  // dependencies and nothing else.
+  output: process.env.NEXT_OUTPUT === 'standalone' ? 'standalone' : undefined,
+
+  // Loopback-by-default is the rule for every other process in this repo (`apps/api`
+  // binds 127.0.0.1 in `server.ts`), and the standalone server reads `HOSTNAME` for
+  // its bind address — whose default is `0.0.0.0`. `infra/docker-compose.prod.yml`
+  // therefore sets `HOSTNAME=127.0.0.1` explicitly; if that line is ever removed, the
+  // container starts listening on every interface of the host.
 }
 
 export default config
